@@ -1,0 +1,1553 @@
+"use strict";
+/* ================= config ================= */
+const STATION = "44166";                       // AMeDAS Haneda
+const LAT = 35.5533, LON = 139.7811;           // RJTT
+const MODELS = [
+  {key:"jma_seamless",  name:"JMA",   color:"var(--jma)",   hex:"#2C6E8A"},
+  {key:"ecmwf_ifs025",  name:"ECMWF", color:"var(--ecmwf)", hex:"#545E92"},
+  {key:"gfs_seamless",  name:"GFS",   color:"var(--gfs)",   hex:"#7A8B5E"},
+  {key:"icon_seamless", name:"ICON",  color:"var(--icon)",  hex:"#9A6B4F"},
+  {key:"ecmwf_aifs025", name:"AIFS·AI", color:"var(--aifs)", hex:"#8C5A7A"},
+  {key:"ukmo_seamless", name:"UKMO",  color:"var(--ukmo)", hex:"#B08D3E"},
+  {key:"gem_seamless",  name:"GEM",   color:"var(--gem)",  hex:"#4E8A78"},
+];
+// Neighbor AMeDAS stations for spatial / sea-breeze-front context
+const NEIGHBORS = [
+  {id:"44132", name:"Tokyo · inland"},
+  {id:"46106", name:"Yokohama · SW coast"},
+];
+const DIR_NAMES = ["CALM","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW","N"];
+const ONSHORE = new Set([4,5,6,7,8,9]);      // E–SSW: off Tokyo Bay into RJTT
+const INLAND  = new Set([11,12,13,14,15,16]); // WSW–N: across the Tokyo metro (UHI)
+const BIAS_DECAY_H = 6;
+// Climatological normal daily-MAX temperature for Tokyo (°C), by month (Jan..Dec).
+// Standard Tokyo normals; used only as a seasonal sanity bound, interpolated by date.
+const NORMAL_MAX = [9.8,10.9,14.2,19.4,23.6,26.1,29.9,31.3,27.5,22.0,16.7,12.0];
+function normalHigh(){
+  const t = jstParts();
+  const m = t.mo - 1;
+  const daysIn = new Date(Date.UTC(t.y, t.mo, 0)).getUTCDate();
+  const frac = (t.da - 1) / Math.max(1, daysIn - 1);   // 0..1 through the month
+  const next = (m + 1) % 12;
+  return NORMAL_MAX[m] + (NORMAL_MAX[next] - NORMAL_MAX[m]) * frac;  // linear toward next month
+}
+const REFRESH_MS = 5*60*1000;
+
+/* ================= time helpers (JST) ================= */
+function jst(){ return new Date(Date.now() + 9*3600*1000); } // read with getUTC*
+function jstParts(){
+  const d = jst();
+  return {
+    y:d.getUTCFullYear(), mo:d.getUTCMonth()+1, da:d.getUTCDate(),
+    h:d.getUTCHours(), mi:d.getUTCMinutes(), s:d.getUTCSeconds(),
+    dec: d.getUTCHours() + d.getUTCMinutes()/60
+  };
+}
+const p2 = n => String(n).padStart(2,"0");
+function todayKey(){ const t=jstParts(); return `${t.y}${p2(t.mo)}${p2(t.da)}`; }
+function todayISO(){ const t=jstParts(); return `${t.y}-${p2(t.mo)}-${p2(t.da)}`; }
+function tomorrowISO(){
+  const d = new Date(jst().getTime() + 24*3600*1000);
+  return `${d.getUTCFullYear()}-${p2(d.getUTCMonth()+1)}-${p2(d.getUTCDate())}`;
+}
+function yesterdayISO(){
+  const d = new Date(jst().getTime() - 24*3600*1000);
+  return `${d.getUTCFullYear()}-${p2(d.getUTCMonth()+1)}-${p2(d.getUTCDate())}`;
+}
+function yesterdayKey(){ return yesterdayISO().replaceAll("-",""); }
+function d2ISO(){
+  const d = new Date(jst().getTime() - 48*3600*1000);
+  return `${d.getUTCFullYear()}-${p2(d.getUTCMonth()+1)}-${p2(d.getUTCDate())}`;
+}
+function d2Key(){ return d2ISO().replaceAll("-",""); }
+function hhmm(dec){ const h=Math.floor(dec), m=Math.round((dec-h)*60); return `${p2(h)}:${p2(m)}`; }
+const fmt1 = v => (v==null||!isFinite(v)) ? "—" : v.toFixed(1);
+
+/* ================= state ================= */
+let S = { obs:[], obsMax:null, obsMaxT:null, cur:null, curT:null, winds:[], hum:null,
+          metars:[], metarMax:null, dewp:null, metarWind:null, taf:null, suns:[], press:[], rains:[], cloud:null, models:{}, tomorrow:{}, ok:{},
+          neighbors:{}, ydayObsMax:null, ydayModelMax:{}, d2ObsMax:null, d2ModelMax:{}, jmaFx:null, fxRain:null, t850:null, t850Curves:{}, w850:null, hums:[], fxBreeze:null };
+
+/* ================= fetchers ================= */
+async function fetchAmedas(){
+  const head = await fetch("https://www.jma.go.jp/bosai/amedas/data/latest_time.txt", {cache:"no-store"});
+  if(!head.ok) throw new Error("latest_time " + head.status);
+  const t = jstParts();
+  const blocks = [];
+  for(let b=0; b<=t.h; b+=3) blocks.push(p2(b));
+  const key = todayKey();
+  const results = await Promise.allSettled(blocks.map(b =>
+    fetch(`https://www.jma.go.jp/bosai/amedas/data/point/${STATION}/${key}_${b}.json`, {cache:"no-store"})
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+  ));
+  const pts = [], wnd = [], suns = [], press = [], rains = [], hums = [];
+  let lastHum = null;
+  for(const res of results){
+    if(res.status !== "fulfilled") continue;
+    for(const [ts, v] of Object.entries(res.value)){
+      if(!ts.startsWith(key)) continue;
+      const hour = parseInt(ts.slice(8,10),10) + parseInt(ts.slice(10,12),10)/60;
+      const temp = (v && v.temp) ? v.temp[0] : null;
+      if(temp!=null && isFinite(temp)) pts.push({t:hour, v:temp});
+      const dir = (v && v.windDirection) ? v.windDirection[0] : null;
+      const spd = (v && v.wind) ? v.wind[0] : null;
+      if(dir!=null || spd!=null) wnd.push({t:hour, dir, spd});
+      const hu = (v && v.humidity) ? v.humidity[0] : null;
+      if(hu!=null && isFinite(hu)){ lastHum = {t:hour, v:hu}; hums.push({t:hour, v:hu}); }
+      const su = (v && v.sun10m) ? v.sun10m[0] : null;   // minutes of sunshine in the 10-min window
+      if(su!=null && isFinite(su)) suns.push({t:hour, v:su});
+      const rn = (v && v.precipitation10m) ? v.precipitation10m[0] : null;  // mm in 10 min
+      if(rn!=null && isFinite(rn)) rains.push({t:hour, v:rn});
+      const pr = (v && v.normalPressure) ? v.normalPressure[0]
+               : (v && v.pressure) ? v.pressure[0] : null;
+      if(pr!=null && isFinite(pr)) press.push({t:hour, v:pr});
+    }
+  }
+  pts.sort((a,b)=>a.t-b.t);
+  wnd.sort((a,b)=>a.t-b.t);
+  suns.sort((a,b)=>a.t-b.t);
+  press.sort((a,b)=>a.t-b.t);
+  rains.sort((a,b)=>a.t-b.t);
+  hums.sort((a,b)=>a.t-b.t);
+  S.winds = wnd; S.hum = lastHum; S.hums = hums; S.suns = suns; S.press = press; S.rains = rains;
+  if(!pts.length) throw new Error("no obs yet");
+  S.obs = pts;
+  let mx=-1e9, mt=null;
+  for(const p of pts) if(p.v>mx){mx=p.v; mt=p.t;}
+  S.obsMax = mx; S.obsMaxT = mt;
+  const last = pts[pts.length-1];
+  S.cur = last.v; S.curT = last.t;
+}
+
+async function fetchMetar(){
+  const r = await fetch("https://aviationweather.gov/api/data/metar?ids=RJTT&format=json&hours=28", {cache:"no-store"});
+  if(!r.ok) throw new Error("metar " + r.status);
+  const arr = await r.json();
+  if(!Array.isArray(arr) || !arr.length) throw new Error("metar empty");
+  const key = todayISO();
+  let mmax = null;
+  const list = [];
+  for(const m of arr){
+    const raw = m.rawOb || m.raw_text || "";
+    const when = m.reportTime || m.receiptTime || "";
+    list.push({raw, when});
+    // reportTime is UTC "YYYY-MM-DD HH:MM:SS" → shift to JST
+    const d = new Date((when.replace(" ","T"))+"Z");
+    if(!isNaN(d)){
+      const j = new Date(d.getTime()+9*3600*1000);
+      const iso = `${j.getUTCFullYear()}-${p2(j.getUTCMonth()+1)}-${p2(j.getUTCDate())}`;
+      if(iso===key && m.temp!=null && isFinite(m.temp)) mmax = Math.max(mmax??-1e9, m.temp);
+    }
+  }
+  S.metars = list.slice(0,6);
+  S.metarMax = mmax;
+  if(arr[0] && arr[0].dewp!=null && isFinite(arr[0].dewp)) S.dewp = arr[0].dewp;
+  if(arr[0]){
+    const r0 = arr[0].rawOb || arr[0].raw_text || "";
+    const wm = r0.match(/\b(\d{3}|VRB)(\d{2,3})(?:G(\d{2,3}))?(KT|MPS)\b/);
+    if(wm){
+      const toKt = wm[4]==="MPS" ? 1.94384 : 1;
+      S.metarWind = {
+        dir: wm[1]==="VRB" ? null : parseInt(wm[1],10),
+        spd: parseInt(wm[2],10)*toKt,
+        gust: wm[3] ? parseInt(wm[3],10)*toKt : null,
+        ws: /\bWS\b/.test(r0)
+      };
+    }
+  }
+  // fall back to METAR for current obs if AMeDAS failed
+  if(S.cur==null && arr[0] && arr[0].temp!=null){
+    S.cur = arr[0].temp;
+    const d = new Date((arr[0].reportTime||"").replace(" ","T")+"Z");
+    if(!isNaN(d)){ const j=new Date(d.getTime()+9*3600*1000); S.curT = j.getUTCHours()+j.getUTCMinutes()/60; }
+    if(S.metarMax!=null && S.obsMax==null){ S.obsMax = S.metarMax; }
+  }
+}
+
+async function fetchModels(){
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}`
+    + `&hourly=temperature_2m,cloud_cover,precipitation,temperature_850hPa,wind_direction_10m,wind_direction_850hPa,wind_speed_850hPa&models=${MODELS.map(m=>m.key).join(",")}`
+    + `&timezone=Asia%2FTokyo&forecast_days=2&past_days=2`;
+  const r = await fetch(url, {cache:"no-store"});
+  if(!r.ok) throw new Error("open-meteo " + r.status);
+  const j = await r.json();
+  const H = j.hourly || {};
+  const times = H.time || [];
+  const i0 = times.findIndex(t => t.startsWith(todayISO()));
+  const i1 = times.findIndex(t => t.startsWith(tomorrowISO()));
+  const iY = times.findIndex(t => t.startsWith(yesterdayISO()));
+  const iD2 = times.findIndex(t => t.startsWith(d2ISO()));
+  if(i0<0) throw new Error("no today hours");
+  for(const m of MODELS){
+    const a = H[`temperature_2m_${m.key}`] || H.temperature_2m;
+    if(!a) continue;
+    const today = [], tomo = [];
+    for(let k=0;k<24;k++){
+      const v = a[i0+k];
+      today.push((v==null)?null:v);
+      if(i1>=0){ const w=a[i1+k]; tomo.push((w==null)?null:w); }
+    }
+    if(today.some(v=>v!=null)) S.models[m.key] = today;
+    const tv = tomo.filter(v=>v!=null);
+    if(tv.length) S.tomorrow[m.key] = Math.max(...tv);
+    if(iY>=0){
+      const yv=[];
+      for(let k=0;k<24;k++){ const v=a[iY+k]; if(v!=null) yv.push(v); }
+      if(yv.length) S.ydayModelMax[m.key] = Math.max(...yv);
+    }
+    if(iD2>=0){
+      const dv=[];
+      for(let k=0;k<24;k++){ const v=a[iD2+k]; if(v!=null) dv.push(v); }
+      if(dv.length) S.d2ModelMax[m.key] = Math.max(...dv);
+    }
+  }
+  const cloud = [];
+  for(let k=0;k<24;k++){
+    const vs = MODELS.map(m => { const c = H[`cloud_cover_${m.key}`]; return c ? c[i0+k] : null; })
+                     .filter(v => v!=null && isFinite(v));
+    cloud.push(vs.length ? vs.reduce((a,b)=>a+b,0)/vs.length : null);
+  }
+  if(cloud.some(v=>v!=null)) S.cloud = cloud;
+  // 850 hPa temperature at midday (11–15 JST): the synoptic airmass marker
+  {
+    const vals = [];
+    for(const m of MODELS){
+      const a8 = H[`temperature_850hPa_${m.key}`]; if(!a8) continue;
+      const curve8 = [];
+      for(let k=0;k<24;k++){ const v=a8[i0+k]; curve8.push((v!=null && isFinite(v)) ? v : null); }
+      if(curve8.some(v=>v!=null)) S.t850Curves[m.key] = curve8;
+      const mid = [];
+      for(let k=11;k<=15;k++){ const v=a8[i0+k]; if(v!=null && isFinite(v)) mid.push(v); }
+      if(mid.length) vals.push(mid.reduce((x,y)=>x+y,0)/mid.length);
+    }
+    if(vals.length){
+      S.t850 = { mean: vals.reduce((a,b)=>a+b,0)/vals.length,
+                 lo: Math.min(...vals), hi: Math.max(...vals), n: vals.length };
+    }
+    // midday 850 hPa wind: vector mean across models (foehn / advection detector)
+    let u=0, v=0, wn=0, spds=[];
+    for(const m of MODELS){
+      const wd = H[`wind_direction_850hPa_${m.key}`], ws = H[`wind_speed_850hPa_${m.key}`];
+      if(!wd || !ws) continue;
+      for(let k=11;k<=15;k++){
+        const dirv = wd[i0+k], spv = ws[i0+k];
+        if(dirv==null || spv==null) continue;
+        const r = dirv*Math.PI/180;
+        u += Math.sin(r)*spv; v += Math.cos(r)*spv; spds.push(spv); wn++;
+      }
+    }
+    if(wn){
+      let dir = Math.atan2(u/wn, v/wn)*180/Math.PI; if(dir<0) dir+=360;
+      S.w850 = {dir: Math.round(dir), spd: spds.reduce((a,b)=>a+b,0)/spds.length};
+    }
+  }
+  // forecast sea-breeze onset: first hour 09–17 JST each model turns the wind onshore (70–215°)
+  {
+    const onsets = [];
+    for(const m of MODELS){
+      const wd = H[`wind_direction_10m_${m.key}`]; if(!wd) continue;
+      let hr = null;
+      for(let k=9;k<=17;k++){
+        const v = wd[i0+k];
+        if(v!=null && v>=70 && v<=215){ hr = k; break; }
+      }
+      if(hr!=null) onsets.push(hr);
+    }
+    if(onsets.length){
+      onsets.sort((a,b)=>a-b);
+      const med = onsets.length%2 ? onsets[(onsets.length-1)/2] : (onsets[onsets.length/2-1]+onsets[onsets.length/2])/2;
+      S.fxBreeze = {median: med, lo: onsets[0], hi: onsets[onsets.length-1], n: onsets.length, total: MODELS.length};
+    } else {
+      S.fxBreeze = {median: null, n: 0};
+    }
+  }
+  // forecast rain: mean across models of the next-3h precip total (mm)
+  {
+    const nowH = Math.floor(jstParts().dec);
+    const sums = MODELS.map(m => {
+      const a2 = H[`precipitation_${m.key}`]; if(!a2) return null;
+      let sum=0, n=0;
+      for(let k=nowH; k<Math.min(24,nowH+3); k++){ const v=a2[i0+k]; if(v!=null){sum+=v;n++;} }
+      return n? sum : null;
+    }).filter(v=>v!=null);
+    if(sums.length) S.fxRain = sums.reduce((a,b)=>a+b,0)/sums.length;
+  }
+  if(!Object.keys(S.models).length) throw new Error("no model data");
+}
+
+async function fetchNeighbors(){
+  // latest 3-hour block for each neighbor station -> most recent temp + wind dir
+  const t = jstParts();
+  const block = p2(Math.floor(t.h/3)*3);
+  const key = todayKey();
+  const res = await Promise.allSettled(NEIGHBORS.map(n =>
+    fetch(`https://www.jma.go.jp/bosai/amedas/data/point/${n.id}/${key}_${block}.json`, {cache:"no-store"})
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+  ));
+  res.forEach((r,i)=>{
+    if(r.status!=="fulfilled") return;
+    const keys = Object.keys(r.value).filter(k=>k.startsWith(key)).sort();
+    if(!keys.length) return;
+    const last = r.value[keys[keys.length-1]];
+    const temp = last && last.temp ? last.temp[0] : null;
+    const dir  = last && last.windDirection ? last.windDirection[0] : null;
+    if(temp!=null && isFinite(temp))
+      S.neighbors[NEIGHBORS[i].id] = {name:NEIGHBORS[i].name, temp, dir,
+        t: parseInt(keys[keys.length-1].slice(8,10),10)+parseInt(keys[keys.length-1].slice(10,12),10)/60};
+  });
+  if(!Object.keys(S.neighbors).length) throw new Error("no neighbor data");
+}
+
+async function fetchYdayObs(){
+  // actual maxes at Haneda for the last two days, for model verification
+  const blocks = ["00","03","06","09","12","15","18","21"];
+  async function dayMax(key){
+    const res = await Promise.allSettled(blocks.map(b =>
+      fetch(`https://www.jma.go.jp/bosai/amedas/data/point/${STATION}/${key}_${b}.json`, {cache:"no-store"})
+        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    ));
+    let mx = null;
+    for(const r of res){
+      if(r.status!=="fulfilled") continue;
+      for(const [ts,v] of Object.entries(r.value)){
+        if(!ts.startsWith(key)) continue;
+        const temp = v && v.temp ? v.temp[0] : null;
+        if(temp!=null && isFinite(temp)) mx = (mx==null)?temp:Math.max(mx,temp);
+      }
+    }
+    return mx;
+  }
+  const [y, d2] = await Promise.all([dayMax(yesterdayKey()), dayMax(d2Key())]);
+  S.ydayObsMax = y; S.d2ObsMax = d2;
+  if(y==null && d2==null) throw new Error("no past obs");
+}
+
+/* ================= model skill ranking ================= */
+function computeSkill(){
+  // Score = 0.6 × mean |daily-max error| over the last 2 verified days
+  //       + 0.4 × mean |model − obs| across today's observations so far.
+  // Lower is better. Ranks drive the blend weights.
+  const scores = {};
+  for(const m of MODELS){
+    const errs = [];
+    if(S.ydayObsMax!=null && S.ydayModelMax[m.key]!=null) errs.push(Math.abs(S.ydayModelMax[m.key]-S.ydayObsMax));
+    if(S.d2ObsMax!=null && S.d2ModelMax[m.key]!=null) errs.push(Math.abs(S.d2ModelMax[m.key]-S.d2ObsMax));
+    const maxErr = errs.length ? errs.reduce((a,b)=>a+b,0)/errs.length : null;
+    let trackMAE = null;
+    const T = S.models[m.key];
+    if(T && S.obs.length >= 6){
+      let sum=0, n=0;
+      for(let i=0; i<S.obs.length; i+=3){           // every 30 min is plenty
+        const p = S.obs[i];
+        const mv = interpHour(T, Math.min(p.t,23.99));
+        if(mv!=null){ sum += Math.abs(p.v - mv); n++; }
+      }
+      if(n) trackMAE = sum/n;
+    }
+    if(maxErr!=null && trackMAE!=null) scores[m.key] = 0.6*maxErr + 0.4*trackMAE;
+    else if(maxErr!=null) scores[m.key] = maxErr;
+    else if(trackMAE!=null) scores[m.key] = trackMAE;
+  }
+  const keys = Object.keys(scores);
+  if(!keys.length) return {scores:{}, ranks:{}, have:false};
+  keys.sort((a,b)=>scores[a]-scores[b]);
+  const ranks = {};
+  keys.forEach((k,i)=>ranks[k]=i+1);
+  return {scores, ranks, have:true, n:keys.length};
+}
+
+async function fetchJmaForecast(){
+  // JMA official public forecast for Tokyo-to (130000): forecaster-edited point temps
+  const r = await fetch("https://www.jma.go.jp/bosai/forecast/data/forecast/130000.json", {cache:"no-store"});
+  if(!r.ok) throw new Error("jma fx " + r.status);
+  const j = await r.json();
+  try{
+    for(const block of j){
+      for(const ts of (block.timeSeries||[])){
+        for(const area of (ts.areas||[])){
+          if(area.temps && area.area && /東京/.test(area.area.name)){
+            const vals = area.temps.map(Number).filter(v=>isFinite(v));
+            if(vals.length){ S.jmaFx = {max: Math.max(...vals), name: area.area.name}; return; }
+          }
+        }
+      }
+    }
+  }catch(e){ /* structure shift: degrade silently */ }
+  if(!S.jmaFx) throw new Error("no temps in jma fx");
+}
+
+async function fetchTaf(){
+  const r = await fetch("https://aviationweather.gov/api/data/taf?ids=RJTT&format=json", {cache:"no-store"});
+  if(!r.ok) throw new Error("taf " + r.status);
+  const arr = await r.json();
+  if(!Array.isArray(arr) || !arr.length) throw new Error("taf empty");
+  const raw = arr[0].rawTAF || arr[0].rawOb || "";
+  const m = raw.match(/TX(M?)(\d{2})\/(\d{2})(\d{2})Z/);
+  let tx=null, txWhen=null;
+  if(m){
+    tx = (m[1]==="M" ? -1 : 1) * parseInt(m[2],10);
+    txWhen = `day ${m[3]} ${p2((parseInt(m[4],10)+9)%24)}:00 JST`;
+  }
+  S.taf = {raw, tx, txWhen};
+}
+
+/* ================= local signals ================= */
+function magnusTd(T,RH){ const a=17.62,b=243.12; const g=Math.log(RH/100)+a*T/(b+T); return b*g/(a-g); }
+function tempNear(x){
+  let best=null, bd=1e9;
+  for(const p of S.obs){ const d=Math.abs(p.t-x); if(d<bd){bd=d; best=p.v;} }
+  return best;
+}
+function analyzeLocal(){
+  const L = {sunTxt:"—", sunNote:"no sunshine data yet",
+             windTxt:"—", windNote:"no wind data yet", flow:null,
+             seaTxt:"—", seaNote:"AMeDAS wind feed needed", seaIn:false, onset:null, drop:null,
+             dewTxt:"—", dewNote:"no moisture data yet",
+             tafTxt:"—", tafNote:"TAF feed unavailable"};
+  const w = S.winds || [];
+  if(w.length){
+    const last = w[w.length-1];
+    const dn = DIR_NAMES[last.dir] ?? "—";
+    L.windTxt = `${dn}${last.spd!=null ? " · "+last.spd.toFixed(1)+" m/s" : ""}`;
+    if(last.dir===0){ L.flow="calm"; L.windNote="calm — radiative heating runs uncapped for now"; }
+    else if(ONSHORE.has(last.dir)){ L.flow="onshore"; L.windNote="onshore off Tokyo Bay — maritime air, cap risk on the high"; }
+    else if(INLAND.has(last.dir)){ L.flow="inland"; L.windNote="flow across the Tokyo metro — heat-island air, upside vs raw models"; }
+    else { L.flow="alongshore"; L.windNote="alongshore — weak land/sea signal"; }
+    let runStart=null;
+    for(let i=w.length-1; i>=0; i--){
+      if(w[i].dir!=null && ONSHORE.has(w[i].dir)) runStart = w[i].t; else break;
+    }
+    if(runStart!=null && (w[w.length-1].t - runStart >= 0.5 || w.length<4)){
+      L.seaIn=true; L.onset=runStart;
+      const tAt = tempNear(runStart);
+      let minAfter=null;
+      for(const p of S.obs) if(p.t>=runStart && p.t<=runStart+1.5) minAfter = (minAfter==null)?p.v:Math.min(minAfter,p.v);
+      if(tAt!=null && minAfter!=null) L.drop = tAt - minAfter;
+      const switched = w.some(pp => pp.t<runStart && pp.dir!=null && pp.dir!==0 && !ONSHORE.has(pp.dir));
+      L.seaTxt = `IN · since ${hhmm(runStart)}`;
+      L.seaNote = (switched ? "switched from land flow; " : "")
+                + (L.drop!=null && L.drop>0.3 ? `−${L.drop.toFixed(1)}°C since onset; ` : "")
+                + (runStart < 13.5
+                   ? "arrived BEFORE the ~14:00 peak → day's max is capped at the pre-onset level (typically 2–4° below inland)"
+                   : "arrived after the peak → max already printed; this only speeds the evening cooldown");
+    } else {
+      L.seaTxt = "NOT IN";
+      const fb = S.fxBreeze;
+      let eta = "onset usually 11:00–14:00 JST";
+      if(fb && fb.median!=null){
+        eta = `models expect onset ~${hhmm(fb.median)} (${fb.n}/${fb.total} agree, range ${hhmm(fb.lo)}–${hhmm(fb.hi)})`;
+        L.breezeEta = fb.median;
+      } else if(fb && fb.n===0){
+        eta = "models keep the wind offshore all afternoon — breeze may not arrive; inland-style high possible";
+      }
+      const yoko = S.neighbors && S.neighbors["46106"];
+      const yokoOn = yoko && yoko.dir!=null && ONSHORE.has(yoko.dir);
+      L.seaNote = eta + (yokoOn ? " · ⚠ Yokohama is already onshore — front approaching, Haneda onset likely within the hour"
+                                : "") + " · arrival before ~14:00 caps the max; after, it only cools the evening";
+    }
+  }
+  // sunshine: minutes of sun in the latest 10-min window + fraction over the last hour
+  const su = S.suns || [];
+  if(su.length){
+    const last = su[su.length-1];
+    const hourAgo = last.t - 1;
+    const recent = su.filter(x => x.t > hourAgo);
+    const got = recent.reduce((a,b)=>a+b.v, 0);
+    const poss = recent.length * 10;
+    const frac = poss>0 ? got/poss : null;
+    L.sunTxt = `${Math.round(last.v)}/10 min`;
+    let pr = "";
+    if(S.press && S.press.length>=2){
+      const d = S.press[S.press.length-1].v - S.press[0].v;
+      pr = ` · MSLP ${S.press[S.press.length-1].v.toFixed(0)} hPa ${d>=0.6?"rising (offshore-high risk → sea-breeze cap)":d<=-0.6?"falling":"steady"}`;
+    }
+    L.sunNote = (frac==null ? "tracking insolation"
+                : frac>=0.8 ? `near-full sun (${Math.round(frac*100)}% of last hr) — strong heating, supports the high`
+                : frac>=0.4 ? `broken sun (${Math.round(frac*100)}% of last hr) — moderate heating`
+                : `mostly cloud (${Math.round(frac*100)}% of last hr) — heating capped, downside on the max`) + pr;
+    if(S.cloud){
+      const nowH = Math.floor(jstParts().dec);
+      const rest = S.cloud.slice(nowH, 15).filter(v=>v!=null);
+      if(rest.length){
+        const avg = rest.reduce((a,b)=>a+b,0)/rest.length;
+        L.sunNote += ` · forecast cloud to ~14:00 avg ${Math.round(avg)}%`;
+      }
+    }
+  } else {
+    L.sunNote = "no sunshine element in this station feed";
+  }
+
+  // rain: observed 10-min + last hour, plus model next-3h
+  L.rainTxt="—"; L.rainNote="no precipitation data"; L.raining=false;
+  {
+    const rr = S.rains || [];
+    const last = rr.length ? rr[rr.length-1] : null;
+    const hourTotal = rr.filter(x=>last && x.t>last.t-1).reduce((a,b)=>a+b.v,0);
+    const fx = S.fxRain;
+    if(last){
+      L.raining = last.v>0 || hourTotal>0.5;
+      L.rainTxt = L.raining ? `${last.v.toFixed(1)} mm/10min` : "DRY";
+      const parts=[];
+      if(L.raining) parts.push(`${hourTotal.toFixed(1)} mm last hr — heating shut off, high effectively capped at current level`);
+      else parts.push("no rain at station");
+      if(fx!=null) parts.push(fx>=1 ? `models: ${fx.toFixed(1)} mm next 3 h — rain risk, downside on the max`
+                            : fx>=0.2 ? `models: light showers possible next 3 h (${fx.toFixed(1)} mm)`
+                            : "models: dry next 3 h");
+      L.rainNote = parts.join(" · ");
+    } else if(fx!=null){
+      L.rainTxt = fx>=1 ? "RAIN RISK" : "DRY (FX)";
+      L.rainNote = `models: ${fx.toFixed(1)} mm next 3 h`;
+    }
+  }
+
+  let td = S.dewp, src = "METAR";
+  if(td==null && S.hum && S.cur!=null){ td = magnusTd(S.cur, S.hum.v); src = "AMeDAS RH"; }
+  if(td!=null && S.cur!=null){
+    const spread = S.cur - td;
+    // Td trend over the last ~3 h from AMeDAS RH + temp
+    let tdTrend = null;
+    if(S.hums && S.hums.length){
+      const now3 = jstParts().dec - 3;
+      const old = S.hums.find(x => x.t >= now3 - 0.4 && x.t <= now3 + 0.4);
+      const oT = old ? tempNear(old.t) : null;
+      if(old && oT!=null){ tdTrend = td - magnusTd(oT, old.v); }
+    }
+    L.dewTrend = tdTrend;
+    L.dewTxt = `${fmt1(td)}°C · Δ${fmt1(spread)}°`;
+    L.dewNote = (td>=21 ? `humid air mass (${src}) — solar energy goes to moisture, caps the max`
+              : td<=12 ? `dry air mass (${src}) — efficient surface heating, upside if sunny`
+              : `moderate moisture (${src}) — broadly neutral for the high`)
+              + (tdTrend!=null && Math.abs(tdTrend)>=0.7
+                 ? (tdTrend<0 ? ` · Td falling ${fmt1(-tdTrend)}°/3h — drying, heating efficiency improving (upside)`
+                              : ` · Td rising ${fmt1(tdTrend)}°/3h — moistening, cap tightening`)
+                 : ``);
+  }
+  if(S.taf){
+    if(S.taf.tx!=null){
+      L.tafTxt = `${S.taf.tx}°C`;
+      L.tafNote = `TX group, valid ${S.taf.txWhen} — forecaster-edited; weigh above raw global models`;
+    } else { L.tafTxt = "no TX"; L.tafNote = "latest TAF carries no max-temp group"; }
+  }
+
+  // --- operations: runway flow, breeze shift, shear/turbulence ---
+  L.flowTxt="—"; L.flowNote="awaiting wind"; L.shiftTxt="—"; L.shiftNote="—";
+  L.turbTxt="—"; L.turbNote="awaiting wind";
+  let rDir=null, rSpd=null, rGust=null, rWS=false, rSrc="AMeDAS";
+  if(S.metarWind){ rDir=S.metarWind.dir; rSpd=S.metarWind.spd; rGust=S.metarWind.gust; rWS=S.metarWind.ws; rSrc="METAR"; }
+  else if(w.length){ const last=w[w.length-1]; rDir = (last.dir!=null && last.dir!==0) ? (last.dir-1)*22.5 : null; rSpd = last.spd!=null ? last.spd*1.94384 : null; }
+  if(rDir!=null){
+    const north = (rDir>=290 || rDir<=70);
+    const south = (rDir>=110 && rDir<=250);
+    const hr = jstParts().h;
+    if(north){ L.flowTxt="NORTH-FLOW"; L.flowNote="landings 34L/34R, departures 34R/05 (typical, ATC/noise-abatement dependent)"; }
+    else if(south){
+      L.flowTxt="SOUTH-FLOW";
+      L.flowNote = (hr>=15 && hr<19)
+        ? "departures 16L/16R; afternoon arrivals via the central-Tokyo 16L/16R routes (15–19 JST, typical)"
+        : "departures 16L/16R; arrivals 22/23 (typical, ATC/noise-abatement dependent)";
+    } else { L.flowTxt="VARIABLE"; L.flowNote="light/variable — configuration set by ATC and noise-abatement rules"; }
+  }
+  if(L.seaIn && L.onset!=null){ L.shiftTxt=`SEA · ${hhmm(L.onset)}`; L.shiftNote="bay flow established; expect south-flow / config change around onset"; }
+  else if(L.flow==="inland"||L.flow==="calm"){ L.shiftTxt="LAND / CALM"; L.shiftNote="land breeze or calm — sea breeze typically sets in 11:00–14:00 JST"; }
+  else { L.shiftTxt="—"; L.shiftNote="no clear land/sea transition yet"; }
+  if(rSpd!=null){
+    const gustFactor = (rGust!=null) ? (rGust-rSpd) : 0;
+    const southerly = rDir!=null && rDir>=140 && rDir<=220;
+    const reasons=[];
+    if(rWS) reasons.push("METAR windshear group");
+    if(southerly && rSpd>=15) reasons.push("strong southerly over Boso Peninsula — mechanical turbulence on approach");
+    if(gustFactor>=10) reasons.push(`gusting +${Math.round(gustFactor)} kt`);
+    if(reasons.length){
+      L.turbTxt = rWS ? "WS / TURB" : "TURB RISK";
+      L.turbNote = reasons.join("; ") + ` (${rSrc} ${rDir!=null?Math.round(rDir)+"°":"VRB"}/${Math.round(rSpd)}${rGust?"G"+Math.round(rGust):""} kt)`;
+    } else {
+      L.turbTxt="LOW";
+      L.turbNote = `smooth — ${rSrc} ${rDir!=null?Math.round(rDir)+"°":"VRB"}/${Math.round(rSpd)} kt, no shear signal`;
+    }
+  }
+  return L;
+}
+
+/* ================= analog days: history-based prediction ================= */
+function obsAt(x){
+  let best=null, bd=0.45;
+  for(const p of S.obs){ const d=Math.abs(p.t-x); if(d<bd){bd=d; best=p.v;} }
+  return best;
+}
+function onshoreAt9(){
+  let best=null, bd=0.6;
+  for(const p of (S.winds||[])){ const d=Math.abs(p.t-9); if(d<bd && p.dir!=null){bd=d; best=p.dir;} }
+  if(best==null) return null;
+  return ONSHORE.has(best) ? 1 : 0;
+}
+function dayOfYear(){
+  const t = jstParts();
+  return Math.floor((Date.UTC(t.y,t.mo-1,t.da) - Date.UTC(t.y,0,0))/864e5);
+}
+async function maybeFetchArchive(){
+  try{
+    const cached = localStorage.getItem("rjtt_arc_v1");
+    if(cached){ const o = JSON.parse(cached); if(o.fetched === todayISO() && o.days && o.days.length){ S.archive = o; return; } }
+  }catch(e){}
+  try{
+    const end = yesterdayISO();
+    const start = new Date(jst().getTime() - 730*864e5);
+    const sIso = `${start.getUTCFullYear()}-${p2(start.getUTCMonth()+1)}-${p2(start.getUTCDate())}`;
+    const u = `https://archive-api.open-meteo.com/v1/archive?latitude=${LAT}&longitude=${LON}&start_date=${sIso}&end_date=${end}&hourly=temperature_2m,cloud_cover,wind_direction_10m&timezone=Asia%2FTokyo`;
+    const r = await fetch(u); if(!r.ok) throw new Error("archive "+r.status);
+    const j = await r.json(); const H = j.hourly || {};
+    const T = H.temperature_2m||[], C = H.cloud_cover||[], W = H.wind_direction_10m||[], times = H.time||[];
+    const days = [];
+    for(let i=0; i+23 < T.length; i+=24){
+      const t6 = T[i+6], t9 = T[i+9];
+      if(t6==null || t9==null) continue;
+      let hi=-1e9, hiH=14;
+      for(let h=0; h<24; h++){ const v=T[i+h]; if(v!=null && v>hi){hi=v; hiH=h;} }
+      if(hi<-100) continue;
+      let cs=0, cn=0;
+      for(let h=6; h<13; h++){ const v=C[i+h]; if(v!=null){cs+=v; cn++;} }
+      const wd = W[i+9];
+      const dt = new Date(times[i]);
+      const doy = Math.floor((Date.UTC(dt.getUTCFullYear(),dt.getUTCMonth(),dt.getUTCDate()) - Date.UTC(dt.getUTCFullYear(),0,0))/864e5);
+      days.push({doy, t9:+t9.toFixed(1), ramp:+(t9-t6).toFixed(2),
+                 cloud: cn?Math.round(cs/cn):null,
+                 on: (wd!=null)?((wd>=70&&wd<=215)?1:0):null,
+                 hi:+hi.toFixed(1), hiH});
+    }
+    if(!days.length) throw new Error("empty archive");
+    S.archive = {fetched: todayISO(), days};
+    try{ localStorage.setItem("rjtt_arc_v1", JSON.stringify(S.archive)); }catch(e){}
+  }catch(e){ /* analog panel degrades gracefully */ }
+}
+function computeAnalogs(){
+  const arc = S.archive;
+  if(!arc || !arc.days || !arc.days.length) return null;
+  if(jstParts().dec < 9.16) return {pending:true};
+  const t9 = obsAt(9), t6 = obsAt(6);
+  if(t9==null || t6==null) return null;
+  const ramp = t9 - t6;
+  let cloud = null;
+  if(S.cloud){ const cs = S.cloud.slice(6,13).filter(v=>v!=null); if(cs.length) cloud = cs.reduce((a,b)=>a+b,0)/cs.length; }
+  const wOn = onshoreAt9();
+  const doy = dayOfYear();
+  const scored = [];
+  for(const d of arc.days){
+    let dd = Math.abs(doy - d.doy); dd = Math.min(dd, 365-dd);
+    if(dd > 45) continue;                       // same season only
+    let dist = Math.abs(t9 - d.t9) + 1.5*Math.abs(ramp - d.ramp);
+    if(cloud!=null && d.cloud!=null) dist += Math.abs(cloud - d.cloud)/25;
+    if(wOn!=null && d.on!=null && wOn!==d.on) dist += 0.8;
+    scored.push([dist, d]);
+  }
+  scored.sort((a,b)=>a[0]-b[0]);
+  const K = scored.slice(0,15).map(x=>x[1]);
+  if(K.length < 5) return null;
+  const deltas = K.map(d=>d.hi - d.t9).sort((a,b)=>a-b);
+  const q = p => deltas[Math.min(deltas.length-1, Math.floor(p*deltas.length))];
+  const peaks = K.map(d=>d.hiH).sort((a,b)=>a-b);
+  return {n:K.length, high:t9+q(0.5), lo:t9+q(0.25), hiQ:t9+q(0.75), peak:peaks[Math.floor(peaks.length/2)]};
+}
+
+/* ================= print forecast: what will the next METARs say? ================= */
+function metarPrintOffset(){
+  // mean (METAR print − AMeDAS at the same minute) over today's recent prints
+  const diffs = [];
+  for(const m of (S.metars||[])){
+    const raw = m.raw || "";
+    const tm = raw.match(/\b\d{2}(\d{2})(\d{2})Z\b/);
+    const tg = raw.match(/\s(M?)(\d{2})\/(M?\d{2}|\/\/)/);
+    if(!tm || !tg) continue;
+    const tJ = ((parseInt(tm[1],10)+9)%24) + parseInt(tm[2],10)/60;
+    const mt = (tg[1]==="M" ? -1 : 1) * parseInt(tg[2],10);
+    const ov = obsAt(tJ);
+    if(ov!=null) diffs.push(mt - ov);
+  }
+  if(!diffs.length) return {off:0, n:0};
+  return {off: diffs.reduce((a,b)=>a+b,0)/diffs.length, n: diffs.length};
+}
+function printForecast(nc){
+  const now = jstParts().dec;
+  const pts = (S.obs||[]).filter(p => p.t > now - 0.7);
+  if(pts.length < 3 || S.cur==null) return null;
+  // least-squares trend over the last ~40 min (°C per hour)
+  const n = pts.length;
+  const mx = pts.reduce((a,p)=>a+p.t,0)/n, my = pts.reduce((a,p)=>a+p.v,0)/n;
+  let num=0, den=0;
+  for(const p of pts){ num += (p.t-mx)*(p.v-my); den += (p.t-mx)**2; }
+  const slope = den>0 ? num/den : 0;
+  const {off, n:offN} = metarPrintOffset();
+  // next three report times (:00 / :30)
+  const rows = [];
+  let t0 = Math.ceil(now*2)/2; if(t0 - now < 0.03) t0 += 0.5;
+  for(let i=0; i<3; i++){
+    const tP = t0 + 0.5*i; if(tP >= 24) break;
+    const dt = tP - (S.curT ?? now);
+    const proj = S.cur + slope*Math.min(dt, 1.2) + off;
+    const sg = 0.18 + 0.25*Math.max(0, tP - now);
+    const k = Math.round(proj);
+    const pk = kk => phi((kk+0.5-proj)/sg) - phi((kk-0.5-proj)/sg);
+    const cand = [k-1,k,k+1].map(kk=>({k:kk, p:pk(kk)})).sort((a,b)=>b.p-a.p);
+    rows.push({tP, isHour: Math.abs(tP-Math.round(tP))<0.01, exp:cand[0].k, prob:cand[0].p, alt:cand[1], proj});
+  }
+  // expected printed max for the rest of the day, sampling the corrected blend
+  let pmHalf=null, pmHour=null;
+  if(nc.blendCurve){
+    for(let h=Math.ceil(now*2)/2; h<24; h+=0.5){
+      const v = interpHour(nc.blendCurve, Math.min(h,23.99));
+      if(v==null) continue;
+      const pv = v + off;
+      if(pmHalf==null || pv>pmHalf) pmHalf = pv;
+      if(Math.abs(h-Math.round(h))<0.01 && (pmHour==null || pv>pmHour)) pmHour = pv;
+    }
+  }
+  const floorK = (S.metarMax!=null) ? Math.round(S.metarMax)
+               : (S.obsMax!=null ? Math.round(S.obsMax + off) : null);
+  const pHalf = pmHalf!=null ? Math.max(floorK ?? -99, Math.round(pmHalf)) : null;
+  const pHour = pmHour!=null ? Math.max(floorK ?? -99, Math.round(pmHour)) : null;
+  return {rows, off, offN, slope, pHalf, pHour};
+}
+
+/* ================= journal: record the 10:30 verdict, grade it next day ================= */
+function journalLoad(){ try{ return JSON.parse(localStorage.getItem("rjtt_jr_v1")||"{}"); }catch(e){ return {}; } }
+function journalSave(j){ try{ localStorage.setItem("rjtt_jr_v1", JSON.stringify(j)); }catch(e){} }
+function journalTick(bucket, high){
+  const now = jstParts().dec; const j = journalLoad(); const k = todayISO();
+  let dirty = false;
+  // record every change of the verdict bucket through the active day (05–16 JST)
+  if(now>=5 && now<=16 && bucket!=null){
+    j[k] = j[k]||{};
+    const c = j[k].calls || [];
+    if(!c.length || c[c.length-1].b !== bucket){
+      c.push({t:+now.toFixed(2), b:bucket});
+      if(c.length>60) c.shift();
+      j[k].calls = c; dirty = true;
+    }
+  }
+  if(now>=10.25 && now<=13 && !(j[k] && j[k].lock)){
+    j[k] = j[k]||{}; j[k].lock = {t:+now.toFixed(2), bucket, high:+(high??0).toFixed(1)};
+    dirty = true;
+  }
+  const yk = yesterdayISO();
+  if(S.ydayObsMax!=null && j[yk] && j[yk].lock && j[yk].actual==null){
+    j[yk].actual = Math.round(S.ydayObsMax); j[yk].actualX = S.ydayObsMax;
+    // when did the verdict FIRST lock onto the correct bucket and stay there?
+    const c = j[yk].calls || [];
+    let callT = null;
+    if(c.length && c[c.length-1].b === j[yk].actual){
+      let i = c.length-1;
+      while(i>0 && c[i-1].b === j[yk].actual) i--;
+      callT = c[i].t;
+    }
+    j[yk].callT = callT;   // null = never stably correct that day
+    dirty = true;
+  }
+  if(dirty) journalSave(j);
+  return j;
+}
+function journalStats(j){
+  const rows = Object.entries(j).filter(([,v])=>v.lock && v.actual!=null)
+                 .sort((a,b)=> a[0]<b[0]?1:-1).slice(0,30);
+  if(!rows.length) return null;
+  let hit=0, mae=0;
+  const callTs = [];
+  for(const [,v] of rows){
+    if(v.lock.bucket===v.actual) hit++;
+    mae += Math.abs(v.lock.high-(v.actualX??v.actual));
+    if(v.callT!=null) callTs.push(v.callT);
+  }
+  callTs.sort((a,b)=>a-b);
+  const medCall = callTs.length ? callTs[Math.floor(callTs.length/2)] : null;
+  return {n:rows.length, hit, mae:mae/rows.length, medCall, callN:callTs.length};
+}
+
+/* ================= morning evidence: should the warm pace be trusted? ================= */
+// When models run cold overnight, the lift only carries to the afternoon max if the
+// warmth is real advected heat. Capping evidence (cloud deck, low sun, heavy forecast
+// cloud, flow already onshore) means it was likely a cloud blanket — discount it.
+function morningEvidence(){
+  const now = jstParts().dec;
+  const E = {trustWarm:1, reasons:[], capScore:0};
+  if(now < 5.5 || now > 14) return E;
+  let cap = 0;
+  const su = S.suns || [];
+  if(now >= 7.5 && su.length){
+    const last = su[su.length-1];
+    const rec = su.filter(x => x.t > last.t - 1);
+    const frac = rec.length ? rec.reduce((a,b)=>a+b.v,0)/(rec.length*10) : null;
+    if(frac!=null){
+      if(frac < 0.4){ cap++; E.reasons.push(`sun only ${Math.round(frac*100)}% last hr`); }
+      else if(frac > 0.75){ cap--; E.reasons.push(`near-full sun`); }
+    }
+  }
+  const raw = (S.metars && S.metars[0] && S.metars[0].raw) || "";
+  if(/(BKN|OVC)0[0-7]\d/.test(raw)){ cap++; E.reasons.push("broken/overcast deck on METAR"); }
+  if(S.cloud){
+    const nowH = Math.floor(now);
+    const rest = S.cloud.slice(nowH, 15).filter(v=>v!=null);
+    if(rest.length){
+      const avg = rest.reduce((a,b)=>a+b,0)/rest.length;
+      if(avg >= 65){ cap++; E.reasons.push(`forecast cloud ${Math.round(avg)}%`); }
+    }
+  }
+  if(now < 11){
+    const w = S.winds || [];
+    const lastw = w[w.length-1];
+    if(lastw && lastw.dir!=null && ONSHORE.has(lastw.dir) && (lastw.spd ?? 0) >= 2){
+      cap++; E.reasons.push("flow already onshore");
+    }
+  }
+  E.capScore = cap;
+  if(cap >= 2) E.trustWarm = 0.35;
+  else if(cap === 1) E.trustWarm = 0.65;
+  return E;
+}
+
+/* ================= strategist read ================= */
+function computeStrategy(nc, loc){
+  const G = {follow:"—", followNote:"needs model + observation data", discard:"—", discardNote:"—", watch:"—", watchNote:"—"};
+  const entries = Object.entries(nc.perModel || {});
+  if(!entries.length) return G;
+  const now = jstParts().dec;
+  const nameOf = k => (MODELS.find(m=>m.key===k)||{}).name || k;
+  const early = S.obs.length < 6;   // pace not yet meaningful pre-dawn
+
+  // split: pace-clean vs pace-broken
+  const PACE_LIM = 1.2;
+  const clean = [], broken = [];
+  for(const [k,pm] of entries){
+    if(pm.bias!=null && Math.abs(pm.bias) >= PACE_LIM && !early) broken.push([k,pm]);
+    else clean.push([k,pm]);
+  }
+  // cluster stats over clean models
+  const highs = clean.map(([,pm])=>pm.projHigh).sort((a,b)=>a-b);
+  const med = highs.length ? (highs.length%2 ? highs[(highs.length-1)/2] : (highs[highs.length/2-1]+highs[highs.length/2])/2) : null;
+  // outliers among clean
+  const OUT_LIM = 1.5;
+  const outliers = med!=null ? clean.filter(([,pm])=>Math.abs(pm.projHigh-med) >= OUT_LIM) : [];
+  const core = clean.filter(([,pm])=>med==null || Math.abs(pm.projHigh-med) < OUT_LIM);
+
+  // FOLLOW: best non-outlier clean model — low |pace|, good skill, JMA home-model tiebreak
+  if(early){
+    const rk1 = entries.find(([k])=> nc.skill && nc.skill.ranks && nc.skill.ranks[k]===1);
+    G.follow = rk1 ? nameOf(rk1[0]) : nameOf(entries[0][0]);
+    const ek = rk1 ? rk1[0] : entries[0][0];
+    G.followKey = ek; G.followHigh = (nc.perModel[ek]||{}).projHigh ?? null;
+    G.followNote = "pre-dawn: pace isn’t meaningful yet — lean on the skill rank and the official forecasts until the 09–13 JST heating ramp";
+  } else if(core.length){
+    let best=null, bestS=1e9;
+    for(const [k,pm] of core){
+      const sk = (nc.skill && nc.skill.scores && nc.skill.scores[k]!=null) ? nc.skill.scores[k] : 0.7;
+      let sc = Math.abs(pm.bias??0) + 0.8*sk - (k==="jma_seamless"?0.08:0);
+      if(sc<bestS){bestS=sc; best=[k,pm];}
+    }
+    G.follow = nameOf(best[0]);
+    const rk = nc.skill && nc.skill.ranks ? nc.skill.ranks[best[0]] : null;
+    G.followKey = best[0]; G.followHigh = best[1].projHigh;
+    G.followNote = `pace ${(best[1].bias>=0?"+":"")}${fmt1(best[1].bias)}°${rk?`, rank #${rk}`:""} — tracking reality and verified; implies the ${Math.round(best[1].projHigh)}° bucket; cluster of ${core.length} clean models reads ${fmt1(Math.min(...core.map(([,p])=>p.projHigh)))}–${fmt1(Math.max(...core.map(([,p])=>p.projHigh)))}°C`;
+  }
+
+  // DISCARD
+  if(broken.length){
+    G.discard = broken.map(([k])=>nameOf(k)).join(" + ");
+    G.discardNote = `running ${broken.map(([,pm])=>(pm.bias>=0?"+":"")+fmt1(pm.bias)+"°").join(", ")} off reality — airmass/cloud wrong; their corrected highs are mostly correction, not forecast`;
+  } else if(!early){
+    G.discard = "NONE"; G.discardNote = "every model is tracking within ±" + PACE_LIM.toFixed(1) + "° — unusually clean board";
+  } else { G.discard = "—"; G.discardNote = "judged after enough observations accumulate"; }
+
+  // OUTLIER WATCH
+  if(outliers.length && med!=null){
+    const [ok_, opm] = outliers.reduce((a,b)=>Math.abs(b[1].projHigh-med)>Math.abs(a[1].projHigh-med)?b:a);
+    const dirHot = opm.projHigh > med;
+    const bits = [];
+    bits.push(`says ${fmt1(opm.projHigh)}° vs cluster ~${fmt1(med)}°`);
+    if(S.jmaFx && dirHot && S.jmaFx.max >= med + 0.7) bits.push(`JMA official ${S.jmaFx.max}° leans its way — fat ${dirHot?"right":"left"} tail`);
+    if(S.t850){
+      const ceil = S.t850.mean + 12;
+      bits.push(dirHot ? (opm.projHigh <= ceil + 0.3 ? `T850 ceiling ~${fmt1(ceil)}° permits it` : `T850 ceiling ~${fmt1(ceil)}° does NOT support it`) : `check T850 floor`);
+    }
+    if(now < 9) bits.push("verdict comes on the 09–13 JST ramp: if its pace holds ~0 while the climb runs hot, it’s live");
+    else if(now <= 13) bits.push("ramp is NOW — watch its pace in real time");
+    else bits.push("ramp has passed — the observed trace has already voted");
+    if(dirHot && loc && loc.seaIn) bits.push("KILL: sea breeze is already in — the hot scenario is dead");
+    else if(dirHot) bits.push("kill switch: sea-breeze IN before ~12:30");
+    G.watch = nameOf(ok_);
+    G.watchNote = bits.join(" · ");
+  } else {
+    G.watch = "NONE";
+    G.watchNote = med!=null ? "no clean model sits ±1.5° off the cluster — distribution is honest, trade the buckets" : "—";
+  }
+  return G;
+}
+
+/* ================= math ================= */
+// standard normal CDF via Abramowitz–Stegun erf approximation
+function phi(x){
+  const t = 1/(1+0.3275911*Math.abs(x)/Math.SQRT2);
+  const e = 1 - (((((1.061405429*t - 1.453152027)*t) + 1.421413741)*t - 0.284496736)*t + 0.254829592)*t * Math.exp(-(x*x)/2);
+  return x>=0 ? 0.5*(1+e) : 0.5*(1-e);
+}
+function computeBuckets(nc){
+  if(nc.high==null) return null;
+  const now = jstParts().dec;
+  // spread: model disagreement + remaining time-to-peak uncertainty, floored
+  const highs = Object.values(nc.perModel).map(p=>p.projHigh);
+  let mean = nc.high;
+  const varM = highs.length>1 ? highs.reduce((a,v)=>a+(v-mean)**2,0)/(highs.length-1) : 0.25;
+  let analogUsed = null;
+  if(S.analog && S.analog.n>=8 && S.analog.high!=null && isFinite(S.analog.high)){
+    mean = 0.75*mean + 0.25*S.analog.high;     // history gets a 25% vote
+    analogUsed = S.analog.high;
+  }
+  const hoursToPeak = Math.max(0, (nc.peakT!=null ? nc.peakT : 14) - now);
+  let sigma = Math.max(0.35, Math.sqrt(varM + (0.25*hoursToPeak/3)**2));
+  if(nc.peakSet){
+    // high already set: residual risk is only rounding edges, missed METAR prints,
+    // and rare late-day warm advection — shrink with hours since the peak
+    const since = Math.max(0, now - (nc.peakT ?? 14));
+    sigma = Math.max(0.15, Math.min(sigma, 0.32 - 0.04*since));
+  }
+  const floorK = (S.metarMax!=null) ? Math.round(S.metarMax) : null;
+  const lo = Math.floor(mean - 3.5*sigma), hi = Math.ceil(mean + 3.5*sigma);
+  const ks = [], ps = [];
+  for(let k=lo; k<=hi; k++){
+    ks.push(k);
+    ps.push(phi((k+0.5-mean)/sigma) - phi((k-0.5-mean)/sigma));
+  }
+  // settlement can't print below the METAR max already recorded:
+  // collapse all mass below floorK into the floor bucket
+  if(floorK!=null){
+    let below = 0;
+    for(let i=0;i<ks.length;i++){ if(ks[i]<floorK){ below += ps[i]; ps[i]=0; } }
+    const fi = ks.indexOf(floorK);
+    if(fi>=0) ps[fi] += below; else { ks.unshift(floorK); ps.unshift(below); }
+  }
+  const total = ps.reduce((a,b)=>a+b,0) || 1;
+  const out = ks.map((k,i)=>({k, p: ps[i]/total})).filter(b=>b.p>=0.01);
+  out.sort((a,b)=>a.k-b.k);
+  return {buckets: out, sigma, floorK, analogUsed, center: mean};
+}
+function interpHour(series, x){
+  const lo = Math.floor(x), hi = Math.min(lo+1,23);
+  const a = series[lo], b = series[hi];
+  if(a==null && b==null) return null;
+  if(a==null) return b; if(b==null) return a;
+  return a + (b-a)*(x-lo);
+}
+function computeNowcast(){
+  const now = jstParts().dec;
+  const out = {perModel:{}, blendCurve:null, high:null, lo:null, hi:null, peakT:null, peakSet:false};
+  const evid = morningEvidence();
+  out.evid = evid;
+  const curves = [];
+  for(const m of MODELS){
+    const T = S.models[m.key]; if(!T) continue;
+    const modelNow = interpHour(T, Math.min(now,23.99));
+    // PACE: recency-weighted mean of (obs - model) over the last 3 h,
+    // i.e. how warm/cold reality is running vs this model's curve.
+    let bias = null;
+    if(modelNow!=null && S.obs.length){
+      let wsum=0, esum=0;
+      for(const p of S.obs){
+        if(p.t < now-3 || p.t > now+0.01) continue;
+        const mv = interpHour(T, Math.min(p.t,23.99));
+        if(mv==null) continue;
+        const w = Math.exp((p.t-now)/1.5);   // half-life ~1 h
+        esum += w*(p.v - mv); wsum += w;
+      }
+      if(wsum>0) bias = esum/wsum;
+    }
+    if(bias==null && S.cur!=null && modelNow!=null) bias = S.cur - modelNow;
+    if(bias==null) bias = 0;
+    const corr = T.map((v,h)=>{
+      if(v==null) return null;
+      if(h < now-1) return v;
+      const w = Math.exp(-Math.max(0,h-now)/BIAS_DECAY_H);
+      return v + bias*w*(bias>0 ? evid.trustWarm : 1);
+    });
+    let rem = -1e9, remT = null;
+    for(let h=Math.floor(now); h<24; h++){
+      if(corr[h]!=null && corr[h]>rem){ rem=corr[h]; remT=h; }
+    }
+    const base = (S.obsMax!=null) ? S.obsMax : -1e9;
+    const projHigh = Math.max(base, rem);
+    out.perModel[m.key] = {
+      rawMax: Math.max(...T.filter(v=>v!=null)),
+      modelNow, bias: (modelNow!=null && (S.cur!=null || S.obs.length))? bias : null,
+      corr, projHigh, remT
+    };
+    curves.push({key:m.key, corr});
+  }
+  if(!curves.length) return out;
+  // skill-weighted blend: better-verified models count more (equal weights if no skill data yet)
+  const skill = computeSkill();
+  out.skill = skill;
+  const wOf = (key) => skill.have && skill.scores[key]!=null ? 1/(0.35 + skill.scores[key]) : 1;
+  out.blendCurve = Array.from({length:24},(_,h)=>{
+    let ws=0, vs=0, any=false;
+    for(const c of curves){
+      const v = c.corr[h]; if(v==null) continue;
+      const w = wOf(c.key); ws += w; vs += w*v; any=true;
+    }
+    return any ? vs/ws : null;
+  });
+  let wsum=0, hsum=0;
+  for(const [k,pm] of Object.entries(out.perModel)){ const w=wOf(k); wsum+=w; hsum+=w*pm.projHigh; }
+  out.high = hsum/wsum;
+  const highs = Object.values(out.perModel).map(p=>p.projHigh);
+  out.lo = Math.min(...highs); out.hi = Math.max(...highs);
+  // peak timing
+  let pk=-1e9, pt=null;
+  for(let h=Math.floor(now); h<24; h++){
+    const v = out.blendCurve[h];
+    if(v!=null && v>pk){ pk=v; pt=h; }
+  }
+  if(S.obsMax!=null && S.obsMax >= pk - 0.05){ out.peakSet = true; out.peakT = S.obsMaxT; }
+  else out.peakT = pt;
+  return out;
+}
+
+/* ================= render ================= */
+function setChip(id, ok, label){
+  const el = document.getElementById(id);
+  el.classList.toggle("ok", ok); el.classList.toggle("bad", !ok);
+  if(label) el.lastChild.textContent = label;
+}
+function render(nc){
+  S.analog = computeAnalogs();
+  const t = jstParts();
+  document.getElementById("m-date").textContent = `${todayISO()}`;
+  document.getElementById("m-updated").textContent = `${hhmm(t.dec)}:${p2(t.s)} JST`;
+  const thM = document.getElementById("th-modelnow");
+  if(thM) thM.textContent = `Model @ ${hhmm(Math.min(t.dec,23.99))}`;
+
+  // readouts
+  const elN = document.getElementById("r-nowcast");
+  elN.textContent = nc.high!=null ? `${fmt1(nc.high)}°C` : "—";
+  const norm = normalHigh();
+  document.getElementById("r-range").textContent =
+    nc.high!=null
+      ? `range ${fmt1(nc.lo)}–${fmt1(nc.hi)}°C · normal ${fmt1(norm)}°C (${(nc.high-norm>=0?"+":"")}${fmt1(nc.high-norm)}° vs normal)`
+      : "model range —";
+  // range bar scaled to ±2°C around blend
+  const bar = document.getElementById("r-rangebar"); bar.innerHTML="";
+  if(nc.high!=null){
+    const span=4, left=nc.high-2;
+    const x = v => Math.min(100,Math.max(0,(v-left)/span*100));
+    const band=document.createElement("div"); band.className="band";
+    band.style.left = x(nc.lo)+"%"; band.style.width = Math.max(1,(x(nc.hi)-x(nc.lo)))+"%";
+    const tick=document.createElement("div"); tick.className="tick"; tick.style.left = x(nc.high)+"%";
+    bar.append(band,tick);
+  }
+  document.getElementById("r-obsmax").textContent = S.obsMax!=null?`${fmt1(S.obsMax)}°C`:"—";
+  document.getElementById("r-obsmax-time").textContent =
+    S.obsMaxT!=null ? `at ${hhmm(S.obsMaxT)} JST` + (S.metarMax!=null?` · METAR max ${fmt1(S.metarMax)}°C`:"") : "no observations yet";
+  document.getElementById("r-current").textContent = S.cur!=null?`${fmt1(S.cur)}°C`:"—";
+  document.getElementById("r-current-time").textContent = S.curT!=null?`obs ${hhmm(S.curT)} JST`:"—";
+  document.getElementById("r-peak").textContent = nc.peakT!=null?hhmm(nc.peakT):"—";
+  const loc = analyzeLocal();
+  document.getElementById("r-peak-note").textContent =
+    (nc.peakT==null ? "—" : nc.peakSet ? "high likely already set" : "blend curve maximum, JST")
+    + (loc.seaIn && !nc.peakSet ? " · sea breeze in, downside risk" : "");
+
+  document.getElementById("s-sun").textContent = loc.sunTxt;
+  document.getElementById("s-sun-note").innerHTML = loc.sunNote +
+    ' · <a href="https://himawari8.nict.go.jp/" target="_blank" rel="noopener" style="color:var(--jma);font-weight:600">Himawari satellite ↗</a>';
+  document.getElementById("s-wind").textContent = loc.windTxt;
+  document.getElementById("s-wind-note").textContent = loc.windNote;
+  const sSea = document.getElementById("s-sea");
+  sSea.textContent = loc.seaTxt;
+  sSea.style.color = loc.seaIn ? "var(--accent)" : "var(--ink)";
+  document.getElementById("s-sea-note").textContent = loc.seaNote;
+  const s850 = document.getElementById("s-t850");
+  if(s850){
+    if(S.t850){
+      s850.textContent = `${fmt1(S.t850.mean)}°C`;
+      const imLo = S.t850.mean + 9, imHi = S.t850.mean + 12;
+      let adv = "";
+      if(S.w850){
+        const d8 = S.w850.dir, s8 = S.w850.spd;
+        if(d8>=240 && d8<=330 && s8>=8) adv = ` · ⚠ 850 wind ${d8}°/${Math.round(s8)} m/s — dry inland/foehn advection off the Kanto–Chubu terrain: aggressive pre-breeze climb risk`;
+        else if(d8>=70 && d8<=200 && s8>=6) adv = ` · 850 wind ${d8}°/${Math.round(s8)} m/s — maritime airmass aloft, suppression`;
+        else adv = ` · 850 wind ${d8}°/${Math.round(s8)} m/s — neutral advection`;
+      }
+      document.getElementById("s-t850-note").innerHTML =
+        `midday 850 hPa airmass (${S.t850.n} models, spread ${fmt1(S.t850.lo)}–${fmt1(S.t850.hi)}°) · sunny well-mixed implies sfc max ~${fmt1(imLo)}–${fmt1(imHi)}°; sea breeze/cloud lands below that${adv} · ` +
+        `<a href="https://www.tropicaltidbits.com/analysis/models/?model=gfs&region=ea&pkg=T850a" target="_blank" rel="noopener" style="color:var(--jma);font-weight:600">GFS T850a ↗</a> ` +
+        `<a href="https://www.tropicaltidbits.com/analysis/models/?model=ecmwf&region=ea&pkg=T850a" target="_blank" rel="noopener" style="color:var(--jma);font-weight:600">ECMWF ↗</a>`;
+    } else {
+      s850.textContent = "—";
+      document.getElementById("s-t850-note").textContent = "no 850 hPa data returned";
+    }
+  }
+  const sRain = document.getElementById("s-rain");
+  if(sRain){
+    sRain.textContent = loc.rainTxt;
+    sRain.style.color = (loc.raining || loc.rainTxt==="RAIN RISK") ? "var(--accent)" : "var(--ink)";
+    document.getElementById("s-rain-note").innerHTML = loc.rainNote +
+      ' · <a href="https://tokyo-ame2.jwa.or.jp/" target="_blank" rel="noopener" style="color:var(--jma);font-weight:600">Amesh radar ↗</a>';
+  }
+  document.getElementById("s-dew").textContent = loc.dewTxt;
+  document.getElementById("s-dew-note").textContent = loc.dewNote;
+  document.getElementById("s-taf").textContent = loc.tafTxt;
+  document.getElementById("s-taf-note").textContent = loc.tafNote;
+  // settlement panel
+  {
+    const fEl = document.getElementById("st-floor");
+    const fNote = document.getElementById("st-floor-note");
+    if(S.metarMax!=null){
+      fEl.textContent = `${Math.round(S.metarMax)}°C`;
+      fNote.textContent = `highest METAR print so far today` +
+        (S.obsMax!=null && S.obsMax - Math.round(S.metarMax) >= 0.5
+          ? ` · AMeDAS has touched ${fmt1(S.obsMax)}° — next METAR may print ${Math.round(S.obsMax)}°`
+          : ``);
+    } else if(S.obsMax!=null){
+      fEl.textContent = `~${Math.round(S.obsMax)}°C`;
+      fNote.textContent = `estimated from AMeDAS ${fmt1(S.obsMax)}° (METAR feed blocked in this browser) — settlement itself uses METAR prints; confirm on Wunderground`;
+    } else { fEl.textContent = "—"; fNote.textContent = "no observations yet today"; }
+    const mi = jstParts().mi;
+    const pf = printForecast(nc);
+    const nEl = document.getElementById("st-next");
+    const nNote = document.getElementById("st-next-note");
+    if(pf && pf.rows.length){
+      const r0 = pf.rows[0];
+      nEl.textContent = `${r0.exp}° @ ${hhmm(r0.tP)}`;
+      if(nNote) nNote.textContent =
+        `in ~${(30 - (mi % 30))} min · ${(r0.prob*100).toFixed(0)}% · alt ${r0.alt.k}° ${(r0.alt.p*100).toFixed(0)}% · projected ${fmt1(r0.proj)}° · trend ${(pf.slope>=0?"+":"")}${(pf.slope/2).toFixed(1)}°/30min`;
+      if(S.metarMax!=null && r0.exp > Math.round(S.metarMax)) nEl.style.color = "var(--accent)";
+      else nEl.style.color = "var(--ink)";
+    } else {
+      nEl.textContent = `~${(30 - (mi % 30))} min`;
+      if(nNote) nNote.textContent = "needs ~30 min of observations to project the print";
+    }
+    const pEl = document.getElementById("st-prints");
+    if(pEl){
+      if(!pf){
+        pEl.textContent = "needs ~30 min of observations to read the trend";
+      } else {
+        const lines = pf.rows.slice(1).map(r =>
+          `${hhmm(r.tP)}${r.isHour?" (hrly)":""} → <b>${r.exp}°</b> ${(r.prob*100).toFixed(0)}%`).join(" · ");
+        let risk = "";
+        const trueB = nc.high!=null ? Math.round(nc.high) : null;
+        if(trueB!=null && pf.pHour!=null){
+          if(pf.pHour < trueB && pf.pHalf!=null && pf.pHalf >= trueB){
+            risk = `<br>⚠ ${trueB}° likely needs the :30 / SPECI prints — hourly-only sampling tops at ${pf.pHour}°`;
+          } else if(pf.pHour < trueB && (pf.pHalf==null || pf.pHalf < trueB)){
+            risk = `<br>⚠ print risk: the curve touches ${fmt1(nc.high)}° between prints — sampled prints may top at ${Math.max(pf.pHour, pf.pHalf ?? pf.pHour)}° and ${trueB}° may never print`;
+          }
+        }
+        pEl.innerHTML =
+          `then: ${lines || "—"}`
+          + `<br>printed-max est: <b>${pf.pHalf??"—"}°</b> (half-hourly) / <b>${pf.pHour??"—"}°</b> (hourly-only)`
+          + (pf.offN ? `<br>sensor offset (METAR−AMeDAS): ${(pf.off>=0?"+":"")}${pf.off.toFixed(1)}° over ${pf.offN} prints`
+                     : `<br>sensor offset unknown (METAR feed blocked) — assuming 0; confirm prints on Wunderground`)
+          + risk;
+      }
+    }
+    const bWrap = document.getElementById("st-buckets");
+    const bk = computeBuckets(nc);
+    const vEl = document.getElementById("st-verdict");
+    const vNote = document.getElementById("st-verdict-note");
+    const vLabel = document.getElementById("st-verdict-label");
+    if(bk && bk.buckets.length && vEl){
+      const sorted = [...bk.buckets].sort((a,b)=>b.p-a.p);
+      const best = sorted[0], second = sorted[1];
+      const tossup = !!(second && (best.p - second.p) < 0.08 && Math.abs(best.k - second.k) === 1 && !nc.peakSet);
+      bk.__top = best; bk.__second = second; bk.__tossup = tossup;
+      vEl.textContent = `${best.k}°C`;
+      const conf = Math.round(best.p*100);
+      const now2 = jstParts().dec;
+      // how close is the day's max to a rounding edge (x.5)?
+      const fracDist = (S.obsMax!=null) ? Math.abs(0.5 - Math.abs(S.obsMax - Math.floor(S.obsMax))) : null;
+      const nearEdge = fracDist!=null && fracDist < 0.2;
+      if(nc.peakSet && now2 >= 15 && !nearEdge){
+        if(vLabel) vLabel.textContent = "Settlement (unofficial)";
+        vNote.textContent = `day's high is in — ${fmt1(S.obsMax)}° at ${hhmm(S.obsMaxT)} JST; ${conf}% · confirm the official print on Wunderground`;
+      } else if(nc.peakSet){
+        if(vLabel) vLabel.textContent = "Likely final";
+        vNote.textContent = (nearEdge
+          ? `peak passed, but ${fmt1(S.obsMax)}° sits near the rounding edge — the adjacent bucket is live; watch the METAR prints · ${conf}%`
+          : `peak has passed; ${conf}% in this bucket · a late warm push can still surprise before ~15:00`);
+      } else {
+        if(vLabel) vLabel.textContent = "Most likely settlement";
+        const hrs = Math.max(0,(nc.peakT??14) - now2);
+        vNote.textContent = `${conf}% in this bucket · ~${hrs.toFixed(1)} h to expected peak — still in play`;
+      }
+      if(tossup){
+        const lo2 = Math.min(best.k, second.k), hi2 = Math.max(best.k, second.k);
+        if(vLabel) vLabel.textContent = "Toss-up";
+        vEl.textContent = `${lo2}/${hi2}°`;
+        vNote.textContent = `dead heat — ${best.k}° ${(best.p*100).toFixed(0)}% vs ${second.k}° ${(second.p*100).toFixed(0)}% · distribution centre ${fmt1(bk.center)}° sits on the bucket boundary · don’t pay up for either side; the tiebreakers follow`;
+      }
+    } else if(vEl){ vEl.textContent="—"; vNote.textContent="needs model data"; if(vLabel) vLabel.textContent="Most likely settlement"; }
+    if(nc.evid && nc.evid.trustWarm < 1 && vEl && bk && bk.buckets.length){
+      vNote.textContent += ` · ⚠ warm pace discounted to ${Math.round(nc.evid.trustWarm*100)}% — ${nc.evid.reasons.join("; ")} (cloud-trapped night heat rarely carries to the peak)`;
+    }
+    if(bk && bk.analogUsed!=null && vEl){
+      vNote.textContent += ` · ${S.analog.n} analog days lean ${fmt1(bk.analogUsed)}° (25% weight in the verdict)`;
+    }
+    // coherence check: does the verdict agree with the FOLLOW model?
+    let followBk = null, followNm = null;
+    if(bk && bk.buckets.length && vEl){
+      const G2 = computeStrategy(nc, loc);
+      if(G2.followHigh!=null){
+        followBk = Math.round(G2.followHigh); followNm = G2.follow;
+        const top = bk.__top || bk.buckets.reduce((a,b)=> b.p>a.p ? b : a);
+        if(bk.__tossup && bk.__second && (followBk===top.k || followBk===bk.__second.k)){
+          vNote.textContent += ` · FOLLOW model (${followNm}) breaks the tie toward ${followBk}°`;
+        } else if(followBk !== top.k){
+          vNote.textContent += ` · ⚠ DIVERGENCE: FOLLOW model (${followNm}) implies ${followBk}° — the ${top.k}° verdict is the pace-lifted ensemble. If the warmth everyone missed was cloud (Sunshine card broken/overcast), favor ${followBk}°; if it’s clear-sky advection, favor ${top.k}°`;
+        } else {
+          vNote.textContent += ` · FOLLOW model (${followNm}) agrees with the verdict`;
+        }
+      }
+    }
+    if(bk && bk.buckets.length){
+      const maxP = Math.max(...bk.buckets.map(b=>b.p));
+      bWrap.innerHTML = bk.buckets.map(b =>
+        `<div class="bucket${b.p===maxP?" top":""}">
+           <span class="bk">${b.k}°C${followBk===b.k?" ◂":""}</span>
+           <div class="bbar"><div style="width:${(b.p*100).toFixed(1)}%"></div></div>
+           <span class="bp">${(b.p*100).toFixed(0)}%</span>
+         </div>`).join("");
+    } else {
+      bWrap.innerHTML = `<div class="sub">needs model data to compute buckets</div>`;
+    }
+
+    // FINAL CALL: arbitrate verdict vs FOLLOW vs headline through the evidence chain
+    const fcEl = document.getElementById("fc-val"), fcNote = document.getElementById("fc-note");
+    if(fcEl && bk && bk.buckets.length){
+      const top = bk.__top || bk.buckets.reduce((a,b)=> b.p>a.p ? b : a);
+      const second = bk.__second, tossup = bk.__tossup;
+      const headB = nc.high!=null ? Math.round(nc.high) : null;
+      const cands = new Set([top && top.k, (tossup && second) ? second.k : null, followBk, headB].filter(v=>v!=null));
+      if(cands.size <= 1){
+        fcEl.textContent = `${top.k}°C`;
+        fcEl.style.color = "var(--ink)";
+        fcNote.textContent = "verdict, FOLLOW model and headline all aligned — trade the number";
+      } else {
+        const hot = Math.max(...cands), cool = Math.min(...cands);
+        let hotV=0, coolV=0; const why=[];
+        if(S.w850){
+          if(S.w850.dir>=240 && S.w850.dir<=330 && S.w850.spd>=8){ hotV+=2; why.push("foehn W–NW aloft (strong hot vote)"); }
+          else if(S.w850.dir>=70 && S.w850.dir<=200 && S.w850.spd>=6){ coolV+=1; why.push("maritime flow aloft"); }
+        }
+        if(loc.dewTrend!=null && loc.dewTrend<=-0.7){ hotV+=1; why.push("Td falling (drying)"); }
+        else if(loc.dewTrend!=null && loc.dewTrend>=0.7){ coolV+=1; why.push("Td rising (moistening)"); }
+        if(nc.evid && nc.evid.trustWarm<1){ coolV+=1; why.push("warm pace already discounted"); }
+        if(S.t850 && hot > S.t850.mean+12.3){ coolV+=2; why.push(`T850 ceiling ~${fmt1(S.t850.mean+12)}° vetoes ${hot}°`); }
+        if(loc.seaIn && !nc.peakSet){ coolV+=2; why.push("sea breeze already in"); }
+        const su=S.suns||[];
+        if(su.length>=4){
+          const last=su[su.length-1], rec=su.filter(x=>x.t>last.t-1);
+          const fr = rec.length ? rec.reduce((a,b)=>a+b.v,0)/(rec.length*10) : null;
+          if(fr!=null){
+            if(fr>=0.75){ hotV+=1; why.push("near-full sun"); }
+            else if(fr<=0.4){ coolV+=1; why.push("mostly cloud"); }
+          }
+        }
+        let pick = hotV>coolV ? hot : cool;
+        let conf = Math.abs(hotV-coolV)>=2 ? "clear" : "lean";
+        if(hotV===coolV){ pick = top.k; conf = "split"; }
+        let printNote = "";
+        if(pf && pick===hot && pf.pHalf!=null && pf.pHour!=null && pf.pHalf < hot && pf.pHour < hot){
+          const pm = Math.max(pf.pHalf, pf.pHour);
+          printNote = ` · ⚠ ${hot}° may never PRINT (printed-max est ${pm}°) — settlement gated to ${pm}°`;
+          pick = pm; conf = "print-gated";
+        }
+        fcEl.textContent = `${pick}°C`;
+        fcEl.style.color = (conf==="split") ? "var(--ink)" : "var(--accent)";
+        fcNote.textContent =
+          (conf==="split" ? "evidence split — defaulting to the verdict bucket"
+           : conf==="print-gated" ? "evidence picked the hot side, then the print gate demoted it"
+           : conf==="clear" ? "evidence chain is clear" : "evidence leans")
+          + ` (hot ${hotV} v cool ${coolV}): ${why.join("; ") || "no strong signals"} · disputed ${cool}° vs ${hot}°${printNote}`;
+      }
+    }
+  }
+
+  document.getElementById("o-flow").textContent = loc.flowTxt;
+  document.getElementById("o-flow-note").textContent = loc.flowNote;
+  document.getElementById("o-shift").textContent = loc.shiftTxt;
+  document.getElementById("o-shift-note").textContent = loc.shiftNote;
+  const oTurb = document.getElementById("o-turb");
+  oTurb.textContent = loc.turbTxt;
+  oTurb.style.color = (loc.turbTxt==="TURB RISK"||loc.turbTxt==="WS / TURB") ? "var(--accent)" : "var(--ink)";
+  document.getElementById("o-turb-note").textContent = loc.turbNote;
+
+  // spatial check vs neighbor stations
+  const nb = Object.values(S.neighbors);
+  const nbEls = [["n-1","n-1-note"],["n-2","n-2-note"]];
+  nbEls.forEach((ids,i)=>{
+    const el=document.getElementById(ids[0]), note=document.getElementById(ids[1]);
+    if(!el) return;
+    const n = nb[i];
+    if(!n){ el.textContent="—"; note.textContent="no data"; return; }
+    const d = (S.cur!=null) ? n.temp - S.cur : null;
+    el.textContent = `${fmt1(n.temp)}°C${d!=null?` (${d>=0?"+":""}${fmt1(d)}°)`:""}`;
+    note.textContent = n.name + (d==null ? "" :
+      d>=1.5 ? " — running warmer than Haneda" :
+      d<=-1.5 ? " — running cooler than Haneda" : " — in line with Haneda");
+  });
+  const sp = document.getElementById("n-read"), spn = document.getElementById("n-read-note");
+  if(sp){
+    const tokyo = S.neighbors["44132"];
+    const dT = (tokyo && S.cur!=null) ? tokyo.temp - S.cur : null;
+    if(dT==null){ sp.textContent="—"; spn.textContent="needs both stations"; }
+    else if(loc.seaIn && dT>=1.5){
+      sp.textContent="FRONT INLAND"; sp.style.color="var(--accent)";
+      spn.textContent=`sea-breeze front sits between Haneda and central Tokyo — Haneda capped while inland runs +${fmt1(dT)}°; upside only if flow reverses`;
+    } else if(dT>=1.5){
+      sp.textContent="INLAND RESERVOIR"; sp.style.color="var(--ink)";
+      spn.textContent=`central Tokyo +${fmt1(dT)}° warmer — that air reaches Haneda on W–NW flow; upside risk to the high`;
+    } else {
+      sp.textContent="UNIFORM"; sp.style.color="var(--ink)";
+      spn.textContent="no meaningful gradient across the basin — models likely have the area right";
+    }
+  }
+
+  // model table
+  const rows = document.getElementById("model-rows"); rows.innerHTML="";
+  for(const m of MODELS){
+    const pm = nc.perModel[m.key];
+    const tr = document.createElement("tr");
+    const rk = nc.skill && nc.skill.ranks ? nc.skill.ranks[m.key] : null;
+    const rkColor = rk==null ? "var(--ink-soft)" : rk<=2 ? "var(--ok)" : (nc.skill.n - rk < 2) ? "var(--bad)" : "var(--ink-soft)";
+    tr.innerHTML = pm ? `
+      <td class="model-name"><span class="pen" style="background:${m.hex}"></span>${m.name}</td>
+      <td style="text-align:left"><b style="color:${rkColor}">${rk!=null?"#"+rk:"—"}</b></td>
+      <td>${fmt1(pm.rawMax)}°C</td>
+      <td>${fmt1(pm.modelNow)}°C</td>
+      <td><span style="color:${pm.bias==null?"inherit":pm.bias>=0.3?"var(--accent)":pm.bias<=-0.3?"var(--jma)":"inherit"};font-weight:${pm.bias!=null&&Math.abs(pm.bias)>=0.3?"600":"400"}">${pm.bias==null?"—":(pm.bias>=0?"+":"")+fmt1(pm.bias)}°</span></td>
+      <td>${(S.ydayModelMax[m.key]!=null && S.ydayObsMax!=null) ? ((S.ydayModelMax[m.key]-S.ydayObsMax>=0?"+":"")+fmt1(S.ydayModelMax[m.key]-S.ydayObsMax)+"°") : "—"}</td>
+      <td class="proj">${fmt1(pm.projHigh)}°C</td>`
+      : `<td class="model-name"><span class="pen" style="background:${m.hex}"></span>${m.name}</td><td colspan="6" style="color:var(--ink-soft)">unavailable</td>`;
+    rows.appendChild(tr);
+  }
+  const tom = MODELS.filter(m=>S.tomorrow[m.key]!=null)
+    .map(m=>`${m.name} ${fmt1(S.tomorrow[m.key])}°`).join(" · ");
+  const refBits = [];
+  if(S.cur!=null && S.curT!=null) refBits.push(`actual ${fmt1(S.cur)}°C @ ${hhmm(S.curT)} JST (AMeDAS)`);
+  if(S.jmaFx) refBits.push(`JMA official ${S.jmaFx.name} high: ${S.jmaFx.max}°C`);
+  if(S.ydayObsMax!=null) refBits.push(`yday actual: ${fmt1(S.ydayObsMax)}°C`);
+  if(tom) refBits.push(`Tomorrow raw maxes: ${tom}C`);
+  document.getElementById("tomorrow-line").textContent = refBits.join("  ·  ");
+
+  // strategist read
+  {
+    const G = computeStrategy(nc, loc);
+    const set=(id,v)=>{const e=document.getElementById(id); if(e) e.textContent=v;};
+    set("g-follow", G.follow); set("g-follow-note", G.followNote);
+    set("g-discard", G.discard); set("g-discard-note", G.discardNote);
+    const w=document.getElementById("g-watch");
+    if(w){ w.textContent=G.watch; w.style.color = (G.watch!=="NONE" && G.watch!=="—") ? "var(--accent)" : "var(--ink)"; }
+    set("g-watch-note", G.watchNote);
+  }
+
+  // analog days panel + track record
+  {
+    const set=(id,v)=>{const e=document.getElementById(id); if(e) e.textContent=v;};
+    const a = S.analog;
+    if(a && a.pending){
+      set("a-high","—"); set("a-high-note","available from ~09:10 JST — needs this morning's 06→09 ramp");
+      set("a-peak","—"); set("a-peak-note","—");
+    } else if(a){
+      set("a-high",`${fmt1(a.high)}°C`);
+      set("a-high-note",`median of ${a.n} similar mornings, IQR ${fmt1(a.lo)}–${fmt1(a.hiQ)}° — matched on 09:00 temp, ramp, cloud, flow, season (2 yrs reanalysis)`);
+      set("a-peak", hhmm(a.peak));
+      set("a-peak-note","median hour those days peaked");
+    } else {
+      set("a-high","—"); set("a-high-note","building history — first load fetches ~2 years of hourly reanalysis (one-time, cached in this browser)");
+      set("a-peak","—"); set("a-peak-note","—");
+    }
+    let jj;
+    const bk2 = computeBuckets(nc);
+    if(bk2 && bk2.buckets.length){
+      const b = bk2.buckets.reduce((x,y)=> y.p>x.p ? y : x);
+      jj = journalTick(b.k, nc.high);
+    } else jj = journalLoad();
+    const st = journalStats(jj);
+    // how long has today's verdict been saying its current bucket?
+    let sinceTxt = "";
+    {
+      const today = jj[todayISO()];
+      const c = today && today.calls;
+      if(c && c.length){
+        let i = c.length-1;
+        while(i>0 && c[i-1].b === c[c.length-1].b) i--;
+        sinceTxt = ` · today: saying ${c[c.length-1].b}° since ${hhmm(c[i].t)} JST`;
+      }
+    }
+    if(st){
+      set("a-rec", `${st.hit}/${st.n}`);
+      set("a-rec-note",
+        `10:30 JST locked verdicts that hit the exact bucket, last ${st.n} graded days · high MAE ${fmt1(st.mae)}°`
+        + (st.medCall!=null ? ` · verdict typically locks onto the right bucket by ${hhmm(st.medCall)} JST (median of ${st.callN} days)` : ``)
+        + sinceTxt + ` — recorded in this browser`);
+    } else {
+      set("a-rec","0/0");
+      set("a-rec-note","locks the verdict at 10:30 JST, grades it next morning, and records WHEN each day's verdict first settled on the correct bucket — builds automatically in this browser" + sinceTxt);
+    }
+  }
+
+  // metar ticker
+  document.getElementById("metar-ticker").innerHTML =
+    (S.metars.length ? S.metars.map(m=>`<b>${(m.when||"").slice(11,16)}Z</b>  ${m.raw}`).join("\n")
+                     : "METAR feed unavailable in this session.")
+    + (S.taf && S.taf.raw ? `\n\n<b>TAF</b>   ${S.taf.raw}` : "");
+
+  drawChart(nc);
+  drawT850();
+}
+
+function drawT850(){
+  const svg = document.getElementById("t850chart");
+  if(!svg) return;
+  const keys = Object.keys(S.t850Curves || {});
+  const W=1000, H=260, L=52, R=16, T=16, B=30;
+  const pw=W-L-R, ph=H-T-B;
+  if(!keys.length){
+    svg.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" style="fill:var(--ink-soft)" font-size="13">no 850 hPa data returned by the models</text>`;
+    return;
+  }
+  let vals=[];
+  for(const k of keys) vals = vals.concat(S.t850Curves[k].filter(v=>v!=null));
+  let ymin=Math.floor(Math.min(...vals))-1, ymax=Math.ceil(Math.max(...vals))+1;
+  if(ymax-ymin<4){ const c=(ymax+ymin)/2; ymin=Math.floor(c-2); ymax=Math.ceil(c+2); }
+  const X = h => L + h/24*pw;
+  const Y = v => T + (ymax-v)/(ymax-ymin)*ph;
+  const now = jstParts().dec;
+  let g = "";
+  // midday assessment window 11–15 JST
+  g += `<rect x="${X(11)}" y="${T}" width="${X(15)-X(11)}" height="${ph}" style="fill:rgba(44,110,138,.08)"/>`;
+  for(let h=0;h<=24;h+=3){
+    g += `<line x1="${X(h)}" y1="${T}" x2="${X(h)}" y2="${T+ph}" style="stroke:var(--grid);stroke-width:1"/>`;
+    g += `<text x="${X(h)}" y="${H-10}" text-anchor="middle" font-size="11" style="fill:var(--ink-soft)">${p2(h%24)}</text>`;
+  }
+  const step = (ymax-ymin>8)?2:1;
+  for(let v=ymin; v<=ymax; v+=step){
+    g += `<line x1="${L}" y1="${Y(v)}" x2="${W-R}" y2="${Y(v)}" style="stroke:var(--grid);stroke-width:1"/>`;
+    g += `<text x="${L-8}" y="${Y(v)+4}" text-anchor="end" font-size="11" style="fill:var(--ink-soft)">${v}°</text>`;
+  }
+  for(const m of MODELS){
+    const a = S.t850Curves[m.key]; if(!a) continue;
+    const d = a.map((v,h)=> v==null?null:[h,v]).filter(Boolean)
+               .map(p=>`${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ");
+    if(d) g += `<polyline points="${d}" fill="none" stroke="${m.hex}" stroke-width="1.6" opacity="0.85"/>`;
+  }
+  // multi-model mean
+  const mean = Array.from({length:24},(_,h)=>{
+    const vs = keys.map(k=>S.t850Curves[k][h]).filter(v=>v!=null);
+    return vs.length ? vs.reduce((a,b)=>a+b,0)/vs.length : null;
+  });
+  const dm = mean.map((v,h)=> v==null?null:[h,v]).filter(Boolean)
+               .map(p=>`${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ");
+  if(dm) g += `<polyline points="${dm}" fill="none" style="stroke:var(--ink);stroke-width:2.4;stroke-dasharray:6 4"/>`;
+  // now marker
+  g += `<line x1="${X(now)}" y1="${T}" x2="${X(now)}" y2="${T+ph}" style="stroke:var(--ink);stroke-width:1.2;stroke-dasharray:4 4;opacity:.6"/>`;
+  // implied surface max annotation from midday mean
+  if(S.t850){
+    g += `<text x="${X(11)+6}" y="${T+16}" font-size="11.5" style="fill:var(--jma);font-weight:600">midday mean ${fmt1(S.t850.mean)}° → sunny mixed sfc max ~${fmt1(S.t850.mean+9)}–${fmt1(S.t850.mean+12)}°</text>`;
+  }
+  svg.innerHTML = g;
+}
+
+function drawChart(nc){
+  const svg = document.getElementById("chart");
+  const W=1000, H=400, L=52, R=16, T=18, B=34;
+  const pw=W-L-R, ph=H-T-B;
+  const now = jstParts().dec;
+
+  // y domain
+  let vals=[];
+  for(const m of MODELS){ const a=S.models[m.key]; if(a) vals=vals.concat(a.filter(v=>v!=null)); }
+  vals = vals.concat(S.obs.map(p=>p.v));
+  if(nc.blendCurve) vals = vals.concat(nc.blendCurve.filter(v=>v!=null));
+  if(!vals.length){ svg.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" style="fill:var(--ink-soft)" font-size="14">Waiting for data…</text>`; return; }
+  let ymin=Math.floor(Math.min(...vals))-1, ymax=Math.ceil(Math.max(...vals))+1;
+  if(ymax-ymin<6){ const c=(ymax+ymin)/2; ymin=Math.floor(c-3); ymax=Math.ceil(c+3); }
+  const X = h => L + h/24*pw;
+  const Y = v => T + (ymax-v)/(ymax-ymin)*ph;
+
+  let g = "";
+  // grid: every 3h vertical, every 2°C horizontal
+  for(let h=0;h<=24;h+=3){
+    g += `<line x1="${X(h)}" y1="${T}" x2="${X(h)}" y2="${T+ph}" style="stroke:var(--grid);stroke-width:1"/>`;
+    g += `<text x="${X(h)}" y="${H-12}" text-anchor="middle" font-size="11" style="fill:var(--ink-soft)">${p2(h%24)}</text>`;
+  }
+  const step = (ymax-ymin>12)?4:2;
+  for(let v=ymin; v<=ymax; v+=step){
+    g += `<line x1="${L}" y1="${Y(v)}" x2="${W-R}" y2="${Y(v)}" style="stroke:var(--grid);stroke-width:1"/>`;
+    g += `<text x="${L-8}" y="${Y(v)+4}" text-anchor="end" font-size="11" style="fill:var(--ink-soft)">${v}°</text>`;
+  }
+  // wind regime strip: blue = onshore (bay), umber = inland (metro)
+  for(const p of (S.winds||[])){
+    if(p.dir==null || p.dir===0) continue;
+    const col = ONSHORE.has(p.dir) ? "#2C6E8A" : (INLAND.has(p.dir) ? "#9A6B4F" : "#AEBBB3");
+    g += `<rect x="${(X(p.t)-1.6).toFixed(1)}" y="${T+ph+3}" width="3.2" height="6" style="fill:${col}"/>`;
+  }
+  // model spaghetti
+  const poly = (pts, attrs) => {
+    const d = pts.filter(p=>p[1]!=null).map(p=>`${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ");
+    return d ? `<polyline points="${d}" fill="none" ${attrs}/>` : "";
+  };
+  for(const m of MODELS){
+    const a=S.models[m.key]; if(!a) continue;
+    g += poly(a.map((v,h)=>[h,v]), `stroke="${m.hex}" stroke-width="1.4" opacity="0.75"`);
+  }
+  // corrected blend (from now onward)
+  if(nc.blendCurve){
+    const pts = nc.blendCurve.map((v,h)=>[h, (h>=Math.floor(now))?v:null]);
+    g += poly(pts, `style="stroke:var(--accent);stroke-width:2.4;stroke-dasharray:7 5"`);
+  }
+  {
+    const norm = normalHigh();
+    if(norm>=ymin && norm<=ymax){
+      g += `<line x1="${L}" y1="${Y(norm)}" x2="${W-R}" y2="${Y(norm)}" style="stroke:var(--jma);stroke-width:1.2;stroke-dasharray:1 5;opacity:.8"/>`;
+      g += `<text x="${L+4}" y="${Y(norm)-6}" font-size="10.5" style="fill:var(--jma)">normal high ~${fmt1(norm)}°</text>`;
+    }
+  }
+  // high watermark
+  if(nc.high!=null){
+    g += `<line x1="${L}" y1="${Y(nc.high)}" x2="${W-R}" y2="${Y(nc.high)}" style="stroke:var(--accent);stroke-width:1.2;stroke-dasharray:2 4"/>`;
+    g += `<text x="${W-R-4}" y="${Y(nc.high)-6}" text-anchor="end" font-size="11.5" style="fill:var(--accent);font-weight:600">nowcast high ${fmt1(nc.high)}°</text>`;
+  }
+  // observed trace, drawn last and heaviest
+  g += poly(S.obs.map(p=>[p.t,p.v]), `style="stroke:var(--ink);stroke-width:2.8;stroke-linejoin:round;stroke-linecap:round"`);
+  if(S.obsMax!=null && S.obsMaxT!=null){
+    g += `<circle cx="${X(S.obsMaxT)}" cy="${Y(S.obsMax)}" r="4.5" style="fill:none;stroke:var(--ink);stroke-width:2"/>`;
+  }
+  // now marker
+  g += `<line x1="${X(now)}" y1="${T}" x2="${X(now)}" y2="${T+ph}" style="stroke:var(--ink);stroke-width:1.2;stroke-dasharray:4 4;opacity:0.6"/>`;
+  g += `<text x="${X(now)+5}" y="${T+14}" font-size="11" style="fill:var(--ink)">現在 ${hhmm(now)}</text>`;
+
+  svg.innerHTML = g;
+}
+
+/* ================= orchestration ================= */
+async function refresh(){
+  document.getElementById("btn-refresh").disabled = true;
+  S = { obs:[], obsMax:null, obsMaxT:null, cur:null, curT:null, winds:[], hum:null, metars:[], metarMax:null, dewp:null, metarWind:null, taf:null, suns:[], press:[], rains:[], cloud:null, models:{}, tomorrow:{}, ok:{}, neighbors:{}, ydayObsMax:null, ydayModelMax:{}, d2ObsMax:null, d2ModelMax:{}, jmaFx:null, fxRain:null, t850:null, t850Curves:{}, w850:null, hums:[], fxBreeze:null };
+  const [a, m, o, tf] = await Promise.allSettled([fetchAmedas(), fetchMetar(), fetchModels(), fetchTaf()]);
+  await Promise.allSettled([fetchNeighbors(), fetchYdayObs(), fetchJmaForecast(), maybeFetchArchive()]);
+  setChip("chip-amedas", a.status==="fulfilled");
+  setChip("chip-metar", m.status==="fulfilled");
+  setChip("chip-models", o.status==="fulfilled");
+  setChip("chip-taf", tf.status==="fulfilled");
+  render(computeNowcast());
+  document.querySelector(".readouts").classList.remove("flash");
+  void document.querySelector(".readouts").offsetWidth;
+  document.querySelector(".readouts").classList.add("flash");
+  document.getElementById("btn-refresh").disabled = false;
+}
+document.getElementById("btn-refresh").addEventListener("click", refresh);
+refresh();
+setInterval(refresh, REFRESH_MS);
+
+/* ================= PWA: register service worker ================= */
+/* Only registers over http(s) — silently skipped on file:// so local
+   double-click still works. */
+if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => {/* offline shell is optional */});
+  });
+}

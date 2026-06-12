@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RJTT Daily High Nowcaster — Tokyo Haneda</title>
+<meta name="description" content="Live daily-maximum-temperature nowcaster for Tokyo Haneda (RJTT / AMeDAS 44166): JMA 10-minute observations, RJTT METAR/TAF, and bias-corrected multi-model guidance with sea-breeze, heat-island, sunshine and dew-point signals.">
+<meta name="theme-color" content="#EFF2EE">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.webmanifest">
+<!-- Open Graph -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="RJTT Daily High Nowcaster — Tokyo Haneda">
+<meta property="og:description" content="Live daily-high temperature nowcaster for Tokyo Haneda with model bias-correction and local sea-breeze / heat-island signals.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Shippori+Mincho:wght@600;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="sheet">
+
+  <header class="masthead">
+    <div class="id">
+      <div class="kicker">Surface temperature nowcast — daily maximum</div>
+      <h1>RJTT · TOKYO HANEDA <span class="jp">東京国際空港 最高気温 実況予測</span></h1>
+    </div>
+    <div class="meta">
+      <div class="row"><span>STATION</span><b>AMeDAS 44166 羽田 / METAR RJTT</b></div>
+      <div class="row"><span>SOURCE</span><a href="https://www.jma.go.jp/bosai/amedas/#amdno=44166&area_type=offices&area_code=130000&format=table10min&elems=7f000" target="_blank" rel="noopener" style="color:var(--jma);font-weight:600;text-decoration:underline">JMA 10-min table ↗</a></div>
+      <div class="row"><span>DATE (JST)</span><b id="m-date">—</b></div>
+      <div class="row"><span>UPDATED</span><b id="m-updated">—</b></div>
+      <button class="refresh" id="btn-refresh">Refresh data</button>
+    </div>
+  </header>
+
+  <div class="sources" id="sources">
+    <a class="chip" id="chip-amedas" href="https://www.jma.go.jp/bosai/amedas/#amdno=44166&area_type=offices&area_code=130000&format=table10min&elems=7f000" target="_blank" rel="noopener" style="text-decoration:none;color:inherit"><span class="dot"></span>JMA AMeDAS 10-min obs ↗</a>
+    <span class="chip" id="chip-metar"><span class="dot"></span>RJTT METAR</span>
+    <span class="chip" id="chip-models"><span class="dot"></span>Open-Meteo models</span>
+    <span class="chip" id="chip-taf"><span class="dot"></span>RJTT TAF</span>
+  </div>
+
+  <section class="readouts" aria-label="Key readouts">
+    <div>
+      <div class="label">Nowcast daily high</div>
+      <div class="big accent" id="r-nowcast">—</div>
+      <div class="range-bar" id="r-rangebar" aria-hidden="true"></div>
+      <div class="sub" id="r-range">model range —</div>
+    </div>
+    <div>
+      <div class="label">Observed high so far</div>
+      <div class="mid" id="r-obsmax">—</div>
+      <div class="sub" id="r-obsmax-time">—</div>
+    </div>
+    <div>
+      <div class="label">Current temp</div>
+      <div class="mid" id="r-current">—</div>
+      <div class="sub" id="r-current-time">—</div>
+    </div>
+    <div>
+      <div class="label">Expected peak</div>
+      <div class="mid" id="r-peak">—</div>
+      <div class="sub" id="r-peak-note">—</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Settlement · Polymarket buckets (whole °C, METAR via Wunderground)</h2>
+      <div class="legend"><a id="wu-link" href="https://www.wunderground.com/history/daily/jp/tokyo/RJTT" target="_blank" rel="noopener" style="color:var(--jma);font-weight:600">resolution source ↗</a></div>
+    </div>
+    <div class="settle">
+      <div class="settle-side">
+        <div class="label">Final call · evidence-arbitrated</div>
+        <div class="big" id="fc-val">—</div>
+        <div class="sub" id="fc-note">—</div>
+        <div class="label" style="margin-top:16px" id="st-verdict-label">Most likely settlement</div>
+        <div class="big accent" id="st-verdict">—</div>
+        <div class="sub" id="st-verdict-note">—</div>
+        <div class="label" style="margin-top:16px">Settlement floor (METAR max)</div>
+        <div class="big" id="st-floor">—</div>
+        <div class="sub" id="st-floor-note">—</div>
+        <div class="label" style="margin-top:16px">Next print (METAR, every 30 min)</div>
+        <div class="mid" id="st-next">—</div>
+        <div class="sub" id="st-next-note">RJTT reports ~:00 / :30 JST</div>
+        <div class="label" style="margin-top:16px">Print forecast</div>
+        <div class="sub" id="st-prints" style="margin-top:4px;line-height:1.8">—</div>
+      </div>
+      <div class="settle-buckets" id="st-buckets"><div class="sub">computing…</div></div>
+    </div>
+    <p class="sub settle-foot">Buckets are P(day's METAR max = k°C): a normal distribution centred on the bias-corrected blend, spread from model disagreement plus time-to-peak uncertainty, with all mass below the already-printed METAR max collapsed into the floor bucket. Heuristic, not a calibrated model — treat as a structured prior, not an edge by itself. When the top two buckets are within 8 points of each other, the verdict declares a <b>toss-up</b> instead of picking a side — the distribution centre is on a bucket boundary and the honest read is the pair, the tiebreakers, and patience. <b>Print forecast:</b> settlement is the max of the <i>discrete prints</i> Wunderground lists, not the continuous curve — so the panel projects the AMeDAS trend onto the next report times (with each print’s expected whole degree and probability), calibrates today’s METAR-minus-AMeDAS sensor offset from actual prints, and estimates the day’s <b>printed max</b> under both half-hourly and hourly-only sampling. When the corrected curve touches a degree between prints that the sampled prints may never catch, a print-risk warning says so — that gap is exactly how a 25.7° day settles at 25. <b>Final call:</b> when the verdict, FOLLOW model and headline disagree on the bucket, an arbiter runs the evidence chain in order — 850 hPa foehn vs maritime flow, the dew-point trend, whether the warm pace was already discounted, the T850 ceiling veto, sea-breeze status, and observed sunshine — tallies hot vs cool votes, picks a side (or admits a split and defaults to the verdict), and finally applies the <b>print gate</b>: a bucket the sampled METAR prints can’t reach is demoted to the printable one, since settlement follows the prints, not the thermometer. The ◂ marks the bucket implied by the strategist’s FOLLOW model; when it differs from the highlighted verdict bucket, the verdict note explains which condition favors which. <b>Morning evidence check:</b> when the ensemble has been lifted by warm overnight pace, the dashboard tests whether that warmth was real — a broken/overcast deck on the METAR, low observed sunshine, heavy forecast cloud, or flow already onshore are capping evidence that the night heat was cloud-trapped, and the warm pace is discounted (to 65% with one signal, 35% with two or more) before it reaches the verdict, with the discount and its reasons printed on the verdict line. Cold pace is never discounted, and the check only runs 05:30–14:00 JST. <b>Analog days:</b> on first load the dashboard fetches ~2 years of hourly reanalysis for the Haneda gridpoint (cached in your browser, refreshed daily) and, from 09:10 JST, finds the 15 past mornings most similar to today — same season (±45 days), closest 09:00 temperature, 06→09 heating ramp, morning cloud, and land/sea flow — then reads off what those days actually peaked at; the analog median gets a visible 25% vote in the verdict, with the IQR and typical peak hour shown. A <b>track record</b> journal locks each day’s verdict at 10:30 JST and grades it against the next morning’s actual high, accumulating a hit-rate and error in this browser — the honest scoreboard for whether any of this works. It also records every change of the verdict through the day and, once graded, computes <b>when the verdict first settled on the correct bucket</b> for good; the median of these times tells you empirically what hour the dashboard’s call becomes trustworthy, and the panel shows how long today’s current call has been holding. Both stores live in this browser only (clearing site data resets them).</p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Local signals · sunshine / rain / T850 / sea breeze / moisture / TAF</h2></div>
+    <div class="signals">
+      <div>
+        <div class="label">Sunshine 日照</div>
+        <div class="mid" id="s-sun">—</div>
+        <div class="sub" id="s-sun-note">—</div>
+      </div>
+      <div>
+        <div class="label">Rain · radar</div>
+        <div class="mid" id="s-rain">—</div>
+        <div class="sub" id="s-rain-note">—</div>
+      </div>
+      <div>
+        <div class="label">T850 · airmass</div>
+        <div class="mid" id="s-t850">—</div>
+        <div class="sub" id="s-t850-note">—</div>
+      </div>
+      <div>
+        <div class="label">Wind &amp; flow regime</div>
+        <div class="mid" id="s-wind">—</div>
+        <div class="sub" id="s-wind-note">no wind data yet</div>
+      </div>
+      <div>
+        <div class="label">Sea breeze 海風</div>
+        <div class="mid" id="s-sea">—</div>
+        <div class="sub" id="s-sea-note">—</div>
+      </div>
+      <div>
+        <div class="label">Dew point / spread</div>
+        <div class="mid" id="s-dew">—</div>
+        <div class="sub" id="s-dew-note">—</div>
+      </div>
+      <div>
+        <div class="label">TAF max (TX)</div>
+        <div class="mid" id="s-taf">—</div>
+        <div class="sub" id="s-taf-note">—</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Approach &amp; runway · Tokyo Bay flow regime</h2></div>
+    <div class="signals ops">
+      <div>
+        <div class="label">Runway flow</div>
+        <div class="mid" id="o-flow">—</div>
+        <div class="sub" id="o-flow-note">—</div>
+      </div>
+      <div>
+        <div class="label">Breeze shift</div>
+        <div class="mid" id="o-shift">—</div>
+        <div class="sub" id="o-shift-note">—</div>
+      </div>
+      <div>
+        <div class="label">Shear / turbulence</div>
+        <div class="mid" id="o-turb">—</div>
+        <div class="sub" id="o-turb-note">—</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Spatial check · neighbor stations vs Haneda</h2></div>
+    <div class="signals ops">
+      <div>
+        <div class="label">Tokyo 44132 · inland</div>
+        <div class="mid" id="n-1">—</div>
+        <div class="sub" id="n-1-note">—</div>
+      </div>
+      <div>
+        <div class="label">Yokohama 46106 · SW coast</div>
+        <div class="mid" id="n-2">—</div>
+        <div class="sub" id="n-2-note">—</div>
+      </div>
+      <div>
+        <div class="label">Basin read</div>
+        <div class="mid" id="n-read">—</div>
+        <div class="sub" id="n-read-note">—</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Today · 10-min observations vs model guidance (JST)</h2>
+      <div class="legend">
+        <span><span class="swatch" style="border-color:var(--ink)"></span>Observed (AMeDAS)</span>
+        <span><span class="swatch dash" style="border-color:var(--accent)"></span>Bias-corrected blend</span>
+        <span><span class="swatch" style="border-color:var(--jma)"></span>JMA</span>
+        <span><span class="swatch" style="border-color:var(--ecmwf)"></span>ECMWF</span>
+        <span><span class="swatch" style="border-color:var(--gfs)"></span>GFS</span>
+        <span><span class="swatch" style="border-color:var(--icon)"></span>ICON</span>
+        <span><span class="swatch" style="border-color:var(--aifs)"></span>AIFS·AI</span>
+        <span><span class="swatch" style="border-color:var(--ukmo)"></span>UKMO</span>
+        <span><span class="swatch" style="border-color:var(--gem)"></span>GEM</span>
+        <span><span class="pen" style="background:#2C6E8A;display:inline-block;width:10px;height:6px"></span>onshore wind</span>
+        <span><span class="pen" style="background:#9A6B4F;display:inline-block;width:10px;height:6px"></span>inland wind</span>
+      </div>
+    </div>
+    <svg id="chart" viewBox="0 0 1000 400" role="img" aria-label="Hourly temperature chart"></svg>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>850 hPa temperature · airmass aloft (JST)</h2>
+      <div class="legend">
+        <span><span class="swatch dash" style="border-color:var(--ink)"></span>model mean</span>
+        <span>shaded: 11–15 midday window</span>
+        <a href="https://www.tropicaltidbits.com/analysis/models/?model=gfs&region=ea&pkg=T850a" target="_blank" rel="noopener" style="color:var(--jma);font-weight:600">GFS map ↗</a>
+        <a href="https://www.tropicaltidbits.com/analysis/models/?model=ecmwf&region=ea&pkg=T850a" target="_blank" rel="noopener" style="color:var(--jma);font-weight:600">ECMWF map ↗</a>
+      </div>
+    </div>
+    <svg id="t850chart" viewBox="0 0 1000 260" role="img" aria-label="850 hPa temperature chart"></svg>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Model board</h2><div class="legend" id="tomorrow-line"></div></div>
+    <table aria-label="Per-model projections">
+      <thead><tr>
+        <th>Model</th><th style="text-align:left">Rank</th><th>Raw daily max</th><th id="th-modelnow">Model @ —</th><th>Pace (3h)</th><th>Yday error</th><th>Corrected high</th>
+      </tr></thead>
+      <tbody id="model-rows"><tr><td colspan="7" style="text-align:left;color:var(--ink-soft)">Loading…</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Strategist read · which model to follow now</h2></div>
+    <div class="signals ops">
+      <div>
+        <div class="label">Follow</div>
+        <div class="mid" id="g-follow">—</div>
+        <div class="sub" id="g-follow-note">—</div>
+      </div>
+      <div>
+        <div class="label">Discard today</div>
+        <div class="mid" id="g-discard">—</div>
+        <div class="sub" id="g-discard-note">—</div>
+      </div>
+      <div>
+        <div class="label">Outlier watch</div>
+        <div class="mid" id="g-watch">—</div>
+        <div class="sub" id="g-watch-note">—</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Analog days · what similar mornings did</h2></div>
+    <div class="signals ops">
+      <div>
+        <div class="label">Analog high</div>
+        <div class="mid" id="a-high">—</div>
+        <div class="sub" id="a-high-note">—</div>
+      </div>
+      <div>
+        <div class="label">Analog peak hour</div>
+        <div class="mid" id="a-peak">—</div>
+        <div class="sub" id="a-peak-note">—</div>
+      </div>
+      <div>
+        <div class="label">Track record</div>
+        <div class="mid" id="a-rec">—</div>
+        <div class="sub" id="a-rec-note">—</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Latest RJTT METARs</h2></div>
+    <div class="ticker" id="metar-ticker">Loading…</div>
+  </section>
+
+  <p class="note" id="method">
+    <b>Method.</b> The observed high comes from JMA AMeDAS station 44166 (Haneda) at 10-minute resolution, cross-checked against RJTT METARs.
+    Each model carries a <b>pace</b>: the recency-weighted average of (observed − model) over the last 3 hours — positive (red) means reality is running warmer than that model's curve, negative (blue) cooler. The pace is applied as a correction to the model's remaining hours, decaying over ~6 h rather than carried in full, because overnight and early-morning pace mostly reflects cloud/wind/inversion errors that daytime mixing erases — pace measured during the 09–13 JST heating ramp is the kind that transfers to the afternoon max.
+    The nowcast high is the larger of the observed high so far and each model's corrected remaining-day maximum; the headline figure is the model mean, with the band showing min–max across models.
+    <b>Local signals:</b> sunshine duration (sun10m) from the same AMeDAS feed is the most direct heating proxy — near-full sun supports the high, persistent cloud caps it — and station pressure tendency flags an offshore high building in (which favours a sea-breeze cap). The midday 850 hPa temperature (the airmass above the sea-breeze layer, averaged across models 11–15 JST) anchors the day’s ceiling — on sunny, well-mixed Kanto days the surface max typically lands ~9–12°C above T850, a standard forecaster rule of thumb, while sea-breeze or cloudy days land below it; links open the Tropical Tidbits East Asia T850-anomaly charts. Observed station rainfall (10-min) and the models’ next-3-hour precipitation flag rain as an immediate cap on the high, with a one-click link to the Tokyo Amesh radar for visual 1–3 h storm tracking. Forecast cloud cover for the rest of the morning is shown alongside the sunshine read, and a dotted climatological normal-high line (Tokyo monthly normals, interpolated by date) is drawn on the chart as a seasonal sanity bound — the headline readout shows how far the nowcast sits above or below it. Wind direction classifies the flow as onshore (E–SSW off Tokyo Bay → sea-breeze cap, typically 2–4°C) or inland (WSW–N across the metro → heat-island upside); a sustained switch to onshore is flagged as sea-breeze onset along with the realized drop, and the chart's bottom strip colors each 10-min wind sample by regime. When the breeze hasn't arrived, the card shows the <b>model-expected onset time</b> (the median first hour the models turn the forecast wind onshore, 09–17 JST, with the agreeing-model count and range) and uses Yokohama's wind as a tripwire — the front usually reaches the SW coast first. The Sunshine card links the Himawari satellite viewer for visually tracking deck breaks and cumulus development — a sudden early-afternoon clearing means a rapid spike; the T850 card adds the <b>midday 850 hPa wind</b>: a dry W–NW flow off the Kanto–Chubu terrain (foehn-type advection) flags aggressive pre-breeze climb risk, while onshore flow aloft flags suppression. The dew point card now also shows the <b>3-hour Td trend</b> — drying improves heating efficiency (upside), moistening tightens the cap. The breeze both lowers and caps: it physically drops the temperature 1–3°C within the hour, and if that happens <i>before</i> the ~14:00 peak the day's maximum is capped at the pre-onset level; arriving after the peak it merely accelerates the evening cooldown without touching the settled high. Dew point (METAR, or derived from AMeDAS RH) gauges how much solar energy is lost to moisture, and the RJTT TAF's TX group gives the forecaster-edited maximum. These appear as flags rather than silent adjustments, so you can see exactly why the headline number might be wrong. The source chip and masthead link open the official JMA 10-minute table for station 44166 that backs this feed. <b>Spatial & verification:</b> neighbor AMeDAS stations (central Tokyo inland, Yokohama on the SW coast) locate the sea-breeze front and measure the inland heat reservoir; each model is <b>ranked</b> (#1 = best) on a composite skill score — 60% its average daily-max error over the last two verified days, 40% how closely it has tracked today’s observations so far — and the headline blend is weighted by that skill, so models that have been right lately count more; the “yday error” column shows how far each raw max missed yesterday’s actual Haneda high, and the <b>strategist read</b> turns the board into a decision: models pacing ±1.2°+ off reality are discarded for the day, the cleanest verified tracker becomes the model to follow, and any clean model sitting ±1.5°+ off the cluster median goes on outlier watch with its confirm/kill conditions (ramp-hours pace, T850 ceiling support, the official-forecast lean, and the sea-breeze kill switch), the model board header carries the JMA official forecast high for Tokyo (note: Tokyo station, not Haneda — they can differ ~1°C on sea-breeze days) and yesterday’s actual, and ECMWF’s AIFS AI model is included as a fifth member.
+    <b>Operations:</b> the same wind also infers the likely runway flow (north-flow vs south-flow) and flags low-level wind shear or mechanical turbulence from strong southerlies crossing the Boso Peninsula, from the parsed METAR wind and gust. These are situational only and do not change the temperature projection — the breeze-shift timing is the one operational cue that also bears on the high. Runway groups are typical configurations and stay subject to ATC and noise-abatement procedures. Data refreshes every 5 minutes.
+  </p>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

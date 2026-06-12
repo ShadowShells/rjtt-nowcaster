@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect x="2" y="2" width="60" height="60" rx="4" fill="#EFF2EE" stroke="#1B2A4A" stroke-width="3"/>
+  <!-- grid -->
+  <g stroke="#C9D2CC" stroke-width="1.2">
+    <line x1="10" y1="20" x2="54" y2="20"/>
+    <line x1="10" y1="32" x2="54" y2="32"/>
+    <line x1="10" y1="44" x2="54" y2="44"/>
+  </g>
+  <!-- diurnal temperature curve -->
+  <path d="M8 50 C 20 50, 24 22, 34 18 C 44 14, 50 30, 56 40" fill="none" stroke="#1B2A4A" stroke-width="3.5" stroke-linecap="round"/>
+  <!-- nowcast dashed extension -->
+  <path d="M34 18 C 40 16, 46 26, 56 26" fill="none" stroke="#D7472E" stroke-width="3" stroke-linecap="round" stroke-dasharray="3 4"/>
+  <!-- peak marker -->
+  <circle cx="34" cy="18" r="4" fill="none" stroke="#1B2A4A" stroke-width="2.5"/>
+</svg>

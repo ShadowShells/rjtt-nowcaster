@@ -1,0 +1,19 @@
+{
+  "name": "RJTT Daily High Nowcaster",
+  "short_name": "RJTT High",
+  "description": "Live daily-maximum-temperature nowcaster for Tokyo Haneda (RJTT / AMeDAS 44166).",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#EFF2EE",
+  "theme_color": "#EFF2EE",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
