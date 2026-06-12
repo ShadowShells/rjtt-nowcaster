@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How it works — RJTT Daily High Nowcaster</title>
+<meta name="description" content="Methodology, data sources and caveats for the RJTT (Tokyo Haneda) daily-high nowcaster.">
+<meta name="theme-color" content="#EFF2EE">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Shippori+Mincho:wght@600;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="sheet">
+
+  <header class="masthead">
+    <div class="id">
+      <div class="kicker">Methodology · data sources · caveats</div>
+      <h1>HOW IT WORKS <span class="jp">仕組み — 最高気温 実況予測</span></h1>
+    </div>
+    <div class="meta">
+      <div class="row"><span>STATION</span><b>AMeDAS 44166 羽田 / METAR RJTT</b></div>
+      <a class="refresh" href="index.html" style="text-decoration:none;display:inline-block;margin-top:6px">← Back to dashboard</a>
+    </div>
+  </header>
+
+  <section class="panel">
+    <div class="panel-head"><h2>1 · The core nowcast</h2></div>
+    <div class="prose">
+      <p>The observed high comes from <b>JMA AMeDAS station 44166 (Haneda)</b> at 10-minute resolution, cross-checked against RJTT METARs. Seven models (JMA·MSM, ECMWF, GFS, ICON, ECMWF-AIFS, UKMO, GEM via Open-Meteo) provide hourly 2-m temperature.</p>
+      <p>Each model carries a <b>pace</b>: the recency-weighted average of (observed − model) over the last 3 hours. Positive (red) means reality is running warmer than that model's curve; negative (blue) cooler. The pace is applied as a correction to the model's remaining hours, <b>decaying over ~6 h</b> rather than carried in full — overnight pace mostly reflects cloud/wind/inversion errors that daytime mixing erases, while pace measured during the 09–13 JST heating ramp is the kind that transfers to the afternoon max.</p>
+      <p>Each model is <b>ranked</b> (#1 = best) on a composite skill score — 60% its average daily-max error over the last two verified days, 40% how closely it has tracked today's observations — and the headline blend is <b>weighted by that skill</b>, so models that have been right lately count more. The "yday error" column shows each raw max against yesterday's actual Haneda high. The nowcast high is the larger of the observed high so far and each model's corrected remaining-day maximum; the headline is the skill-weighted mean with the min–max band. A dotted climatological normal-high line (Tokyo monthly normals, interpolated by date) sits on the chart as a seasonal sanity bound.</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>2 · Settlement, buckets &amp; the print level</h2></div>
+    <div class="prose">
+      <p>Polymarket resolves on <b>Wunderground's RJTT history page in whole °C</b>, which is built from the discrete METAR prints — so settlement follows the prints, not the continuous thermometer. The <b>settlement floor</b> is the highest METAR print so far (estimated from AMeDAS when the METAR feed is blocked, marked with ~).</p>
+      <p><b>Buckets</b> are P(day's METAR max = k°C): a normal distribution centred on the bias-corrected blend, spread from model disagreement plus time-to-peak uncertainty, with all mass below the already-printed floor collapsed into the floor bucket. The analog-day median (section 5) gets a visible 25% vote in the centre. Heuristic, not a calibrated model — a structured prior, not an edge by itself. When the top two buckets are within 8 points, the verdict declares a <b>toss-up</b> instead of picking a side. The verdict graduates: <i>most likely</i> (peak ahead) → <i>likely final</i> (peak just passed, or the max sits near a rounding edge) → <i>settlement (unofficial)</i> once the day is decided.</p>
+      <p><b>Print forecast:</b> the panel projects the AMeDAS trend onto the next :00/:30 report times (each print's expected whole degree with probability), calibrates today's METAR-minus-AMeDAS sensor offset from actual prints, and estimates the day's <b>printed max</b> under both half-hourly and hourly-only sampling. When the curve touches a degree between prints that the sampled prints may never catch, a print-risk warning says so — that gap is exactly how a 25.7° day settles at 25.</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>3 · The final call</h2></div>
+    <div class="prose">
+      <p>When the verdict, FOLLOW model and headline disagree on the bucket, an arbiter runs the evidence chain in order — 850 hPa foehn vs maritime flow, the dew-point trend, whether the warm pace was already discounted, the T850 ceiling veto, sea-breeze status, and observed sunshine — tallies hot vs cool votes, picks a side (or admits a split and defaults to the verdict), and finally applies the <b>print gate</b>: a bucket the sampled METAR prints can't reach is demoted to the printable one. The ◂ on the bucket bars marks the FOLLOW model's implied bucket.</p>
+      <p><b>Morning evidence check (05:30–14:00 JST):</b> when the ensemble has been lifted by warm overnight pace, the dashboard tests whether that warmth was real. A broken/overcast deck on the METAR, low observed sunshine, heavy forecast cloud, or flow already onshore are capping evidence that the night heat was cloud-trapped, and the warm pace is discounted (to 65% with one signal, 35% with two or more) with the reasons printed on the verdict line. Cold pace is never discounted, and the check self-updates — if the deck breaks, trust returns.</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>4 · Local signals</h2></div>
+    <div class="prose">
+      <p><b>Sunshine</b> (AMeDAS sun10m) is the most direct heating proxy, shown with forecast cloud through early afternoon and a link to the Himawari satellite viewer for watching deck breaks. <b>Station pressure tendency</b> flags an offshore high building (sea-breeze cap risk). <b>Rain</b> combines observed 10-minute rainfall with the models' next-3-hour precipitation — rain is an immediate cap — with the Tokyo Amesh radar one click away.</p>
+      <p><b>Sea breeze (海風):</b> wind direction classifies the flow as onshore (E–SSW off Tokyo Bay) or inland (WSW–N across the metro → heat-island upside). A sustained switch to onshore is flagged as onset with the realized drop; the chart's bottom strip colors every 10-minute wind sample by regime. Before arrival, the card shows the <b>model-expected onset time</b> (median first hour the forecast wind turns onshore, with agreeing-model count and range) and uses <b>Yokohama as a tripwire</b> — the front usually reaches the SW coast first. The breeze both lowers and caps: it drops the temperature 1–3°C within the hour, and if that happens <i>before</i> the ~14:00 peak the day's max is capped at the pre-onset level; after the peak it merely speeds the evening cooldown.</p>
+      <p><b>T850 · airmass:</b> the midday 850 hPa temperature (above the sea-breeze layer) anchors the ceiling — on sunny well-mixed Kanto days the surface max lands ~9–12° above T850, a forecaster rule of thumb. The dedicated chart shows each model's T850 curve, the multi-model mean, and the 11–15 JST window. The card adds the <b>midday 850 hPa wind</b>: dry W–NW flow off the Kanto–Chubu terrain (foehn-type advection) flags aggressive pre-breeze climb risk; onshore flow aloft flags suppression. <b>Dew point</b> gauges how much solar energy is lost to moisture, with the 3-hour Td trend — drying improves heating efficiency (upside), moistening tightens the cap. The <b>TAF TX</b> group gives the forecaster-edited maximum.</p>
+      <p><b>Spatial check:</b> neighbor AMeDAS stations (central Tokyo inland, Yokohama SW coast) locate the sea-breeze front and measure the inland heat reservoir — "FRONT INLAND" means Haneda is capped while inland climbs. The model-board header carries the JMA official forecast high for Tokyo (Tokyo station, not Haneda — they can differ ~1° on sea-breeze days). <b>Approach &amp; runway</b> infers north/south-flow and flags Boso-Peninsula shear from the METAR wind; situational only — it never moves the temperature projection.</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>5 · Analog days &amp; the track record</h2></div>
+    <div class="prose">
+      <p>On first load the dashboard fetches <b>~2 years of hourly reanalysis</b> for the Haneda gridpoint (cached in your browser, refreshed daily). From 09:10 JST it finds the <b>15 past mornings most similar to today</b> — same season (±45 days), closest 09:00 temperature, 06→09 heating ramp, morning cloud, land/sea flow — and reads off what those days actually peaked at. The analog median gets a 25% vote in the verdict, with the IQR and typical peak hour shown. Matching is done on the delta above the 09:00 temperature, anchoring the gridpoint reanalysis to today's real station observation.</p>
+      <p>The <b>track record journal</b> locks each day's verdict at 10:30 JST and grades it against the next morning's actual high — hit-rate and mean error accumulate in this browser. It also records every change of the verdict through the day and, once graded, computes <b>when the verdict first settled on the correct bucket</b> for good; the median of those times tells you empirically what hour the call becomes trustworthy, and the panel shows how long today's call has been holding. Both stores live in this browser only — clearing site data resets them, and each device keeps its own.</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>6 · Data sources &amp; caveats</h2></div>
+    <div class="prose">
+      <p><b>Sources:</b> JMA AMeDAS (10-min obs: temp, wind, humidity, sunshine, pressure, rain — stations 44166 Haneda, 44132 Tokyo, 46106 Yokohama), aviationweather.gov (RJTT METAR/TAF), Open-Meteo forecast + archive APIs (7 models, cloud, precip, 850 hPa temperature &amp; wind, 2-yr reanalysis), JMA public forecast (130000), with links out to Wunderground (resolution source), Tokyo Amesh radar, Himawari satellite, and Tropical Tidbits East Asia charts. Everything refreshes every 5 minutes, all times JST.</p>
+      <p><b>Caveats, honestly:</b> thresholds and weights throughout (the 6-h pace decay, the 60/40 skill score, the discount levels, the arbiter's votes, the +9–12° T850 rule) are reasoned heuristics, not fitted parameters — the track record is the instrument for judging them. The METAR feed occasionally blocks in browsers; the dashboard degrades gracefully and estimates the floor from AMeDAS, but confirm settlement on Wunderground. Settlement markets carry real risk; this is an information tool, not financial advice — size like the variance is real, because it is.</p>
+    </div>
+  </section>
+
+  <p class="note"><a href="index.html" style="color:var(--jma);font-weight:600">← Back to the dashboard</a></p>
+</div>
+</body>
+</html>

@@ -121,6 +121,13 @@ td.model-name{font-weight:600}
 td .pen{display:inline-block; width:10px; height:10px; margin-right:8px; vertical-align:-1px}
 td.proj{font-weight:600}
 
+/* ---- prose (about page) ---- */
+.prose{padding:18px 22px; max-width:860px}
+.prose p{font-size:13px; line-height:1.85; margin-bottom:14px; color:var(--ink)}
+.prose p:last-child{margin-bottom:0}
+.prose b{font-weight:600}
+.prose i{font-style:italic}
+
 /* ---- metar ticker ---- */
 .ticker{padding:12px 18px; font-size:12px; line-height:1.9; color:var(--ink-soft); overflow-x:auto; white-space:pre}
 .ticker b{color:var(--ink); font-weight:600}
