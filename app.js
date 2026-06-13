@@ -1682,6 +1682,50 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
 }
 
 
+/* ================= journal export / import ================= */
+(function(){
+  function dl(){
+    let data="{}"; try{ data=localStorage.getItem("rjtt_jr_v1")||"{}"; }catch(e){}
+    const blob=new Blob([data],{type:"application/json"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download=`rjtt-journal-${todayISO()}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  }
+  function up(file){
+    const r=new FileReader();
+    r.onload=()=>{
+      try{
+        const incoming=JSON.parse(r.result);
+        if(typeof incoming!=="object"||Array.isArray(incoming)) throw new Error("bad file");
+        // MERGE rather than overwrite: keep the most-complete record per day
+        let cur={}; try{ cur=JSON.parse(localStorage.getItem("rjtt_jr_v1")||"{}"); }catch(e){}
+        let added=0;
+        for(const k in incoming){
+          const a=cur[k], b=incoming[k];
+          if(!a){ cur[k]=b; added++; continue; }
+          // prefer the entry that has been graded (actual!=null); else keep more calls
+          const aGraded=a.actual!=null, bGraded=b.actual!=null;
+          if(bGraded && !aGraded){ cur[k]=b; added++; }
+          else if(bGraded===aGraded){
+            const an=(a.calls||[]).length, bn=(b.calls||[]).length;
+            if(bn>an){ cur[k]=b; added++; }
+          }
+        }
+        localStorage.setItem("rjtt_jr_v1", JSON.stringify(cur));
+        const n=Object.keys(cur).length;
+        alert(`Journal loaded — merged ${added} day(s), ${n} total now stored. Refreshing…`);
+        location.reload();
+      }catch(e){ alert("Couldn't read that file — make sure it's a journal saved from this dashboard."); }
+    };
+    r.readAsText(file);
+  }
+  const be=document.getElementById("jr-export"), bi=document.getElementById("jr-import"), fi=document.getElementById("jr-file");
+  if(be) be.addEventListener("click", dl);
+  if(bi && fi){ bi.addEventListener("click", ()=>fi.click()); fi.addEventListener("change", e=>{ if(e.target.files[0]) up(e.target.files[0]); }); }
+})();
+
 /* ================= live weather background ================= */
 (function(){
   const cv=document.getElementById("wx"); if(!cv) return;
