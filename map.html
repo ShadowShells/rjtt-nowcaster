@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RJTT Map — Tokyo Bay live stations</title>
+<meta name="theme-color" content="#14171C">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#14171C; --panel:#1B1F26; --ink:#E6ECF2; --ink-soft:#93A0B3;
+  --hairline:#3A434F; --accent:#FF6A4D; --jma:#5BAFD0;
+  --mono:"IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:var(--mono); background:var(--paper); color:var(--ink); overflow:hidden}
+#map{position:absolute; inset:0; background:var(--paper)}
+
+/* top bar */
+.bar{position:absolute; top:0; left:0; right:0; z-index:1000; display:flex; align-items:center; gap:14px;
+  padding:10px 14px; background:linear-gradient(var(--paper),rgba(20,23,28,.0)); pointer-events:none}
+.bar .title{font-size:13px; font-weight:600; letter-spacing:.04em; pointer-events:auto}
+.bar .title a{color:var(--jma); text-decoration:none}
+.bar .spacer{flex:1}
+.bar .chip{pointer-events:auto; font-size:11px; letter-spacing:.06em; background:var(--panel); border:1.5px solid var(--hairline);
+  padding:6px 11px; cursor:pointer; color:var(--ink); display:inline-flex; align-items:center; gap:7px}
+.bar .chip.on{border-color:var(--jma); color:var(--jma)}
+.bar .chip .dot{width:8px;height:8px;border-radius:50%;background:var(--hairline)}
+.bar .chip.on .dot{background:var(--jma)}
+
+/* station markers */
+.stn{display:flex; flex-direction:column; align-items:center; transform:translateY(-50%)}
+.stn .bub{font-size:13px; font-weight:600; color:#fff; width:auto; min-width:48px; height:36px; padding:0 8px;
+  border-radius:18px; display:flex; align-items:center; justify-content:center; border:2px solid rgba(255,255,255,.55);
+  box-shadow:0 2px 8px rgba(0,0,0,.5); white-space:nowrap}
+.stn .lab{margin-top:3px; font-size:10px; letter-spacing:.05em; background:rgba(20,23,28,.82); padding:2px 7px; border-radius:4px; color:#fff}
+.stn.focus .bub{border-color:#E7B53C; border-width:3px}
+.stn.focus .lab{background:#E7B53C; color:#1a1a1a; font-weight:600}
+.barb{position:absolute; left:50%; top:50%; transform-origin:0 0; pointer-events:none}
+
+/* legend + footer */
+.legend{position:absolute; left:12px; bottom:12px; z-index:1000; background:rgba(27,31,38,.9); border:1.5px solid var(--hairline);
+  padding:9px 12px; font-size:10.5px; line-height:1.7; max-width:230px}
+.legend b{color:var(--ink)} .legend .sw{display:inline-block;width:26px;height:9px;vertical-align:middle;margin-right:6px;border-radius:2px}
+.foot{position:absolute; right:10px; bottom:8px; z-index:1000; font-size:10px; color:var(--ink-soft); background:rgba(20,23,28,.7); padding:3px 8px; border-radius:3px}
+.leaflet-popup-content-wrapper{background:var(--panel); color:var(--ink); border:1.5px solid var(--hairline); border-radius:6px}
+.leaflet-popup-tip{background:var(--panel)}
+.leaflet-popup-content{font-family:var(--mono); font-size:12px; line-height:1.7; margin:12px 14px}
+.leaflet-popup-content b{color:var(--jma)}
+.leaflet-container a.leaflet-popup-close-button{color:var(--ink-soft)}
+.leaflet-bar a{background:var(--panel); color:var(--ink); border-bottom-color:var(--hairline)}
+.leaflet-bar a:hover{background:#252b34}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="bar">
+  <div class="title"><a href="index.html">← RJTT Nowcaster</a> · Tokyo Bay live map</div>
+  <div class="spacer"></div>
+  <span class="chip on" id="t-radar"><span class="dot"></span>Rain radar</span>
+  <span class="chip on" id="t-wind"><span class="dot"></span>Wind</span>
+  <span class="chip on" id="t-breeze"><span class="dot"></span>Sea-breeze front</span>
+</div>
+
+<div class="legend" id="legend">
+  <div><b>Temp</b> (°C): <span class="sw" style="background:linear-gradient(90deg,#3A6FB0,#7FB07F,#E7B53C,#E0795F,#C0392B)"></span></div>
+  <div style="margin-top:4px"><b>Wind barb</b> points the way the wind blows; ticks = speed</div>
+  <div style="margin-top:4px"><b>Blue tint</b> = stations on onshore (bay) flow — behind the sea-breeze front</div>
+</div>
+<div class="foot" id="foot">loading…</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+"use strict";
+
+// ---- Tokyo Bay AMeDAS stations (id, name, lat, lon) ----
+const STATIONS = [
+  {id:"44166", name:"Haneda",    lat:35.5533, lon:139.7811, focus:true},
+  {id:"44132", name:"Tokyo",     lat:35.6917, lon:139.7500},
+  {id:"44116", name:"Nerima",    lat:35.7375, lon:139.6553},
+  {id:"44056", name:"Chiba",     lat:35.6017, lon:140.1022},
+  {id:"44046", name:"Funabashi", lat:35.6975, lon:139.9853},
+  {id:"46106", name:"Yokohama",  lat:35.4378, lon:139.6519},
+  {id:"46091", name:"Ebina",     lat:35.4375, lon:139.3906},
+  {id:"44211", name:"Tokorozawa",lat:35.7975, lon:139.4214},
+  {id:"44136", name:"Koto",      lat:35.6469, lon:139.8203},
+];
+const ONSHORE = new Set([4,5,6,7,8,9]); // E..SSW (16-pt index)
+
+const map = L.map("map", {zoomControl:true, attributionControl:false}).setView([35.62, 139.80], 10);
+// dark basemap (free, no key)
+L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+  maxZoom: 19, subdomains:"abcd"
+}).addTo(map);
+L.control.attribution({prefix:false}).addAttribution(
+  '© OpenStreetMap, © CARTO · radar © JMA · obs © JMA AMeDAS').addTo(map);
+
+// ---- temperature color ramp ----
+function tempColor(t){
+  const stops = [[15,"#3A6FB0"],[22,"#7FB07F"],[28,"#E7B53C"],[33,"#E0795F"],[38,"#C0392B"]];
+  if(t<=stops[0][0]) return stops[0][1];
+  if(t>=stops[stops.length-1][0]) return stops[stops.length-1][1];
+  for(let i=0;i<stops.length-1;i++){
+    const [a,ca]=stops[i],[b,cb]=stops[i+1];
+    if(t>=a && t<=b){
+      const f=(t-a)/(b-a);
+      const pa=ca.match(/\w\w/g).map(h=>parseInt(h,16));
+      const pb=cb.match(/\w\w/g).map(h=>parseInt(h,16));
+      const c=pa.map((v,k)=>Math.round(v+(pb[k]-v)*f));
+      return `rgb(${c[0]},${c[1]},${c[2]})`;
+    }
+  }
+  return "#7FB07F";
+}
+// ---- wind barb (SVG), dir = FROM degrees, spd in m/s ----
+function barbSVG(dirFrom, spdMs){
+  const kt = spdMs*1.94384;
+  const ang = dirFrom; // barb points toward source (meteorological convention)
+  let ticks="", y=-34, rem=Math.round(kt/5)*5;
+  // staff
+  let s = `<line x1="0" y1="0" x2="0" y2="-34" stroke="#9fd0e6" stroke-width="2"/>`;
+  while(rem>=50){ ticks+=`<polygon points="0,${y} 9,${y+3} 0,${y+6}" fill="#9fd0e6"/>`; y+=7; rem-=50; }
+  while(rem>=10){ ticks+=`<line x1="0" y1="${y}" x2="9" y2="${y-3}" stroke="#9fd0e6" stroke-width="2"/>`; y+=4; rem-=10; }
+  if(rem>=5){ ticks+=`<line x1="0" y1="${y}" x2="5" y2="${y-2}" stroke="#9fd0e6" stroke-width="2"/>`; }
+  return `<svg width="40" height="40" viewBox="-20 -40 40 44" style="transform:rotate(${ang}deg)">${s}${ticks}</svg>`;
+}
+
+let layerWind=true, layerBreeze=true;
+const markers=[];
+let breezeLine=null;
+
+function dirIdx(deg){ return Math.round(((deg%360)/22.5))%16; }
+function dirName(i){ return ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"][i]; }
+
+async function loadStations(){
+  const now = new Date(Date.now()+9*3600*1000);
+  const p2=n=>String(n).padStart(2,"0");
+  const key=`${now.getUTCFullYear()}${p2(now.getUTCMonth()+1)}${p2(now.getUTCDate())}`;
+  const block=p2(Math.floor(now.getUTCHours()/3)*3);
+  const out=[];
+  await Promise.all(STATIONS.map(async st=>{
+    try{
+      const r=await fetch(`https://www.jma.go.jp/bosai/amedas/data/point/${st.id}/${key}_${block}.json`,{cache:"no-store"});
+      if(!r.ok) return;
+      const j=await r.json();
+      const ks=Object.keys(j).filter(k=>k.startsWith(key)).sort();
+      if(!ks.length) return;
+      const last=j[ks[ks.length-1]];
+      const temp = last.temp ? last.temp[0] : null;
+      const wd = last.windDirection ? last.windDirection[0] : null;
+      const ws = last.wind ? last.wind[0] : null;
+      const hu = last.humidity ? last.humidity[0] : null;
+      const tm = ks[ks.length-1];
+      out.push({...st, temp, wd, ws, hu, t:`${tm.slice(8,10)}:${tm.slice(10,12)}`});
+    }catch(e){}
+  }));
+  return out;
+}
+
+function render(data){
+  markers.forEach(m=>map.removeLayer(m)); markers.length=0;
+  for(const d of data){
+    if(d.temp==null) continue;
+    const onshore = d.wd!=null && d.wd!==0 && ONSHORE.has(((d.wd-1+16)%16));
+    const barb = (layerWind && d.ws!=null && d.wd!=null && d.wd!==0)
+      ? `<div class="barb">${barbSVG((d.wd-1)*22.5, d.ws)}</div>` : "";
+    const html = `<div class="stn ${d.focus?"focus":""}">
+        <div class="bub" style="background:${tempColor(d.temp)}${(layerBreeze&&onshore)?";box-shadow:0 0 0 4px rgba(91,175,208,.35),0 2px 8px rgba(0,0,0,.5)":""}">${d.temp.toFixed(1)}°</div>
+        <div class="lab">${d.name}</div>${barb}
+      </div>`;
+    const icon = L.divIcon({html, className:"", iconSize:[60,60], iconAnchor:[30,30]});
+    const mk = L.marker([d.lat,d.lon],{icon}).addTo(map);
+    const windTxt = (d.wd!=null&&d.wd!==0) ? `${dirName((d.wd-1+16)%16)} ${d.ws!=null?d.ws.toFixed(1)+" m/s":""}` : "calm";
+    mk.bindPopup(`<b>${d.name}</b> · AMeDAS ${d.id}<br>Temp: <b>${d.temp.toFixed(1)}°C</b> @ ${d.t} JST<br>Wind: ${windTxt}${onshore?" · onshore (bay)":""}${d.hu!=null?`<br>Humidity: ${d.hu}%`:""}`);
+    markers.push(mk);
+  }
+  drawBreeze(data);
+}
+
+// crude sea-breeze front: boundary between onshore (bay) and offshore/inland stations
+function drawBreeze(data){
+  if(breezeLine){ map.removeLayer(breezeLine); breezeLine=null; }
+  if(!layerBreeze) return;
+  const onPts = data.filter(d=>d.wd!=null && d.wd!==0 && ONSHORE.has(((d.wd-1+16)%16)));
+  if(onPts.length < 2) return;
+  // shade a translucent polygon over the onshore stations' convex-ish hull (bay side)
+  const pts = onPts.map(d=>[d.lat,d.lon]);
+  // add bay corner anchors so the shading reads as "from the water inward"
+  pts.push([35.30,140.20],[35.75,140.20]);
+  breezeLine = L.polygon(pts, {color:"#5BAFD0", weight:1.5, opacity:.5, fillColor:"#5BAFD0", fillOpacity:.12, dashArray:"4 6"}).addTo(map);
+}
+
+// ---- JMA high-res precip nowcast overlay ----
+let radarLayer=null;
+async function loadRadar(){
+  try{
+    const r=await fetch("https://www.jma.go.jp/bosai/jmatile/data/nowc/targetTimes_N1.json",{cache:"no-store"});
+    if(!r.ok) throw 0;
+    const arr=await r.json();
+    // pick the most recent "now" frame
+    const frame = arr.filter(x=>x.basetime).slice(-1)[0] || arr[arr.length-1];
+    const bt=frame.basetime, vt=frame.validtime;
+    const url=`https://www.jma.go.jp/bosai/jmatile/data/nowc/${bt}/none/${vt}/surf/hrpns/{z}/{x}/{y}.png`;
+    if(radarLayer) map.removeLayer(radarLayer);
+    radarLayer=L.tileLayer(url,{opacity:.55, maxZoom:14, minZoom:3});
+    if(document.getElementById("t-radar").classList.contains("on")) radarLayer.addTo(map);
+    return vt;
+  }catch(e){ return null; }
+}
+
+// ---- toggles ----
+function wireToggle(id, on){
+  const el=document.getElementById(id);
+  el.addEventListener("click",()=>{
+    el.classList.toggle("on");
+    const active=el.classList.contains("on");
+    if(id==="t-radar"){ if(radarLayer){ active?radarLayer.addTo(map):map.removeLayer(radarLayer);} }
+    if(id==="t-wind"){ layerWind=active; refresh(); }
+    if(id==="t-breeze"){ layerBreeze=active; refresh(); }
+  });
+}
+wireToggle("t-radar"); wireToggle("t-wind"); wireToggle("t-breeze");
+
+let lastData=[];
+async function refresh(){
+  lastData = await loadStations();
+  render(lastData);
+  const vt = await loadRadar();
+  const onN = lastData.filter(d=>d.wd!=null&&d.wd!==0&&ONSHORE.has(((d.wd-1+16)%16))).length;
+  document.getElementById("foot").textContent =
+    `${lastData.filter(d=>d.temp!=null).length} stations · ${onN} onshore` +
+    (vt?` · radar ${vt.slice(8,10)}:${vt.slice(10,12)} JST`:` · radar unavailable`) +
+    ` · updates 5 min`;
+}
+refresh();
+setInterval(refresh, 5*60*1000);
+</script>
+</body>
+</html>
