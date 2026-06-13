@@ -1,7 +1,7 @@
 /* RJTT Nowcaster service worker.
    Strategy: cache the app shell so the UI loads instantly and works offline,
    but NEVER cache the live weather APIs — those are always fetched fresh. */
-const SHELL = "rjtt-shell-v6";
+const SHELL = "rjtt-shell-v9";
 const SHELL_FILES = [
   "./",
   "./index.html",

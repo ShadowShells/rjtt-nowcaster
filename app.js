@@ -66,7 +66,7 @@ const fmt1 = v => (v==null||!isFinite(v)) ? "—" : v.toFixed(1);
 /* ================= state ================= */
 let S = { obs:[], obsMax:null, obsMaxT:null, cur:null, curT:null, winds:[], hum:null,
           metars:[], metarMax:null, dewp:null, metarWind:null, taf:null, suns:[], press:[], rains:[], cloud:null, models:{}, tomorrow:{}, ok:{},
-          neighbors:{}, ydayObsMax:null, ydayModelMax:{}, d2ObsMax:null, d2ModelMax:{}, jmaFx:null, fxRain:null, t850:null, t850Curves:{}, w850:null, hums:[], fxBreeze:null };
+          neighbors:{}, ydayObsMax:null, ydayModelMax:{}, d2ObsMax:null, d2ModelMax:{}, jmaFx:null, fxRain:null, t850:null, t850Curves:{}, w850:null, hums:[], fxBreeze:null, sounding:null };
 
 /* ================= fetchers ================= */
 async function fetchAmedas(){
@@ -374,6 +374,31 @@ async function fetchJmaForecast(){
     }
   }catch(e){ /* structure shift: degrade silently */ }
   if(!S.jmaFx) throw new Error("no temps in jma fx");
+}
+
+async function fetchSounding(){
+  const LV=[1000,975,950,925,900,850,800,700,600,500];
+  const t=jstParts();
+  const v=[];
+  for(const L of LV){ v.push(`temperature_${L}hPa`,`relative_humidity_${L}hPa`,`wind_speed_${L}hPa`,`wind_direction_${L}hPa`,`geopotential_height_${L}hPa`); }
+  const url=`https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&hourly=${v.join(",")}&forecast_days=1&timezone=Asia%2FTokyo`;
+  const r=await fetch(url,{cache:"no-store"}); if(!r.ok) throw new Error("sounding "+r.status);
+  const j=await r.json(); const H=j.hourly||{}; const times=H.time||[];
+  // pick the hour nearest 14:00 JST (afternoon mixing) but not before now
+  let idx=times.findIndex(x=>x.startsWith(todayISO()) && +x.slice(11,13)===Math.max(13,Math.min(14,Math.ceil(t.dec))));
+  if(idx<0) idx=times.findIndex(x=>x.startsWith(todayISO()) && +x.slice(11,13)===14);
+  if(idx<0) idx=Math.max(0, times.findIndex(x=>x.startsWith(todayISO())));
+  const lv=[];
+  for(const L of LV){
+    const T=H[`temperature_${L}hPa`], RH=H[`relative_humidity_${L}hPa`], WS=H[`wind_speed_${L}hPa`], WD=H[`wind_direction_${L}hPa`], GH=H[`geopotential_height_${L}hPa`];
+    if(!T) continue;
+    const temp=T[idx], rh=RH?RH[idx]:null, ws=WS?WS[idx]:null, wd=WD?WD[idx]:null, gh=GH?GH[idx]:null;
+    if(temp==null||gh==null) continue;
+    const td = (rh!=null) ? magnusTd(temp, Math.max(1,rh)) : null;
+    lv.push({p:L, t:temp, td, rh, ws, wd, z:gh});
+  }
+  if(lv.length<4) throw new Error("thin sounding");
+  S.sounding={levels:lv, validH:+times[idx].slice(11,13)};
 }
 
 async function fetchTaf(){
@@ -1014,6 +1039,7 @@ function setChip(id, ok, label){
 }
 function render(nc){
   S.analog = computeAnalogs();
+  try{ window.S = S; }catch(e){}
   const t = jstParts();
   document.getElementById("m-date").textContent = `${todayISO()}`;
   document.getElementById("m-updated").textContent = `${hhmm(t.dec)}:${p2(t.s)} JST`;
@@ -1397,6 +1423,76 @@ function render(nc){
 
   drawChart(nc);
   drawT850();
+  drawSounding();
+}
+
+function drawSounding(){
+  const svg=document.getElementById("sndchart"); if(!svg) return;
+  const note=document.getElementById("snd-note");
+  const S0=S.sounding;
+  if(!S0||!S0.levels||S0.levels.length<4){
+    svg.innerHTML=`<text x="350" y="180" text-anchor="middle" style="fill:var(--ink-soft)" font-size="13">sounding unavailable</text>`;
+    if(note) note.textContent="";
+    return;
+  }
+  const lv=S0.levels;
+  const W=700,H=380,L=46,R=130,T=16,B=30, pw=W-L-R, ph=H-T-B;
+  // y axis: pressure log scale (1000 bottom -> 500 top)
+  const pTop=500,pBot=1000;
+  const Y=p=>T+ph*(Math.log(p)-Math.log(pBot))/(Math.log(pTop)-Math.log(pBot));
+  let tmin=1e9,tmax=-1e9;
+  for(const r of lv){ tmin=Math.min(tmin,r.td!=null?r.td:r.t,r.t); tmax=Math.max(tmax,r.t); }
+  tmin=Math.floor(tmin)-3; tmax=Math.ceil(tmax)+3;
+  const X=t=>L+pw*(t-tmin)/(tmax-tmin);
+  let g="";
+  // grid
+  for(const p of [1000,925,850,700,600,500]){
+    g+=`<line x1="${L}" y1="${Y(p)}" x2="${L+pw}" y2="${Y(p)}" style="stroke:var(--grid);stroke-width:1"/>`;
+    g+=`<text x="${L-6}" y="${Y(p)+4}" text-anchor="end" font-size="10.5" style="fill:var(--ink-soft)">${p}</text>`;
+  }
+  for(let t=Math.ceil(tmin/10)*10;t<=tmax;t+=10){
+    g+=`<line x1="${X(t)}" y1="${T}" x2="${X(t)}" y2="${T+ph}" style="stroke:var(--grid);stroke-width:1;opacity:.6"/>`;
+    g+=`<text x="${X(t)}" y="${H-12}" text-anchor="middle" font-size="10.5" style="fill:var(--ink-soft)">${t}°</text>`;
+  }
+  const line=(key,color,w)=>{
+    const pts=lv.filter(r=>r[key]!=null).map(r=>`${X(r[key]).toFixed(1)},${Y(r.p).toFixed(1)}`).join(" ");
+    return pts?`<polyline points="${pts}" fill="none" style="stroke:${color};stroke-width:${w}"/>`:"";
+  };
+  // dewpoint then temperature
+  g+=line("td","var(--jma)",2.2);
+  g+=line("t","var(--accent)",2.6);
+  // dots + wind barbs on the right gutter
+  for(const r of lv){
+    g+=`<circle cx="${X(r.t).toFixed(1)}" cy="${Y(r.p).toFixed(1)}" r="2.4" style="fill:var(--accent)"/>`;
+    if(r.wd!=null&&r.ws!=null){
+      const bx=L+pw+22, by=Y(r.p);
+      g+=`<g transform="translate(${bx},${by}) rotate(${(r.wd)})"><line x1="0" y1="0" x2="0" y2="-16" style="stroke:var(--ink-soft);stroke-width:1.5"/></g>`;
+      g+=`<text x="${L+pw+40}" y="${by+3}" font-size="9.5" style="fill:var(--ink-soft)">${Math.round(r.ws*1.94384)}kt</text>`;
+    }
+  }
+  svg.innerHTML=g;
+
+  // ---- analysis: mixing height + inversion + ceiling check ----
+  const sfc=lv[0];
+  // surface parcel dry-adiabatic ascent: T_parcel(p) = T_sfc * (p/p_sfc)^(R/cp), simpler in height: -9.8C/km
+  // find where environmental T meets the dry adiabat from the (forecast) surface max
+  const sfcMax = (S.sounding && S.obsMax!=null) ? Math.max(sfc.t, S.obsMax) : sfc.t;
+  let mixP=null, mixZ=null;
+  for(let i=1;i<lv.length;i++){
+    const dz=(lv[i].z - sfc.z)/1000;
+    const parcelT = sfcMax - 9.8*dz;            // dry adiabat from surface
+    if(parcelT <= lv[i].t){ mixP=lv[i].p; mixZ=Math.round(lv[i].z - sfc.z); break; }
+  }
+  // inversion: any layer where T increases with height
+  let inv=null;
+  for(let i=1;i<lv.length;i++){ if(lv[i].t > lv[i-1].t + 0.3){ inv={p0:lv[i-1].p,p1:lv[i].p,z0:Math.round(lv[i-1].z-sfc.z)}; break; } }
+  const parts=[];
+  parts.push(`valid ~${p2(S0.validH)}:00 JST`);
+  if(mixZ!=null) parts.push(`mixing height ≈ ${mixZ} m (to ${mixP} hPa)`);
+  else parts.push(`deep mixing — no cap found below 500 hPa`);
+  if(inv) parts.push(`⚠ inversion ${inv.p0}→${inv.p1} hPa (~${inv.z0} m) — lid on surface heating, suppresses the max`);
+  else parts.push(`no low-level inversion — surface can mix freely toward the T850 ceiling`);
+  if(note) note.innerHTML = parts.join(" · ");
 }
 
 function drawT850(){
@@ -1526,8 +1622,10 @@ function drawChart(nc){
 /* ================= orchestration ================= */
 async function refresh(){
   document.getElementById("btn-refresh").disabled = true;
-  S = { obs:[], obsMax:null, obsMaxT:null, cur:null, curT:null, winds:[], hum:null, metars:[], metarMax:null, dewp:null, metarWind:null, taf:null, suns:[], press:[], rains:[], cloud:null, models:{}, tomorrow:{}, ok:{}, neighbors:{}, ydayObsMax:null, ydayModelMax:{}, d2ObsMax:null, d2ModelMax:{}, jmaFx:null, fxRain:null, t850:null, t850Curves:{}, w850:null, hums:[], fxBreeze:null };
+  S = { obs:[], obsMax:null, obsMaxT:null, cur:null, curT:null, winds:[], hum:null, metars:[], metarMax:null, dewp:null, metarWind:null, taf:null, suns:[], press:[], rains:[], cloud:null, models:{}, tomorrow:{}, ok:{}, neighbors:{}, ydayObsMax:null, ydayModelMax:{}, d2ObsMax:null, d2ModelMax:{}, jmaFx:null, fxRain:null, t850:null, t850Curves:{}, w850:null, hums:[], fxBreeze:null, sounding:null };
+  try{ window.S = S; }catch(e){}
   const [a, m, o, tf] = await Promise.allSettled([fetchAmedas(), fetchMetar(), fetchModels(), fetchTaf()]);
+  await Promise.allSettled([fetchSounding()]);
   await Promise.allSettled([fetchNeighbors(), fetchYdayObs(), fetchJmaForecast(), maybeFetchArchive()]);
   setChip("chip-amedas", a.status==="fulfilled");
   setChip("chip-metar", m.status==="fulfilled");
@@ -1551,3 +1649,115 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
     navigator.serviceWorker.register("sw.js").catch(() => {/* offline shell is optional */});
   });
 }
+
+
+/* ================= live weather background ================= */
+(function(){
+  const cv=document.getElementById("wx"); if(!cv) return;
+  const ctx=cv.getContext("2d");
+  let W=0,Hh=0, dpr=Math.min(2,window.devicePixelRatio||1);
+  function size(){ W=cv.clientWidth=window.innerWidth; Hh=cv.clientHeight=window.innerHeight;
+    cv.width=W*dpr; cv.height=Hh*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); }
+  window.addEventListener("resize", size); size();
+
+  // particles
+  let drops=[], clouds=[], flakesInit=false;
+  function makeRain(n){ drops=[]; for(let i=0;i<n;i++) drops.push({x:Math.random()*W,y:Math.random()*Hh,l:8+Math.random()*14,v:380+Math.random()*320,w:Math.random()*0.6+0.4}); }
+  function makeClouds(n){ clouds=[]; for(let i=0;i<n;i++) clouds.push({x:Math.random()*W,y:Math.random()*Hh*0.7,r:120+Math.random()*220,v:6+Math.random()*12,a:0.05+Math.random()*0.08}); }
+
+  // state set from the dashboard's live data
+  let mode="clear", intensity=0.4, windPush=0.15, last=performance.now();
+
+  function setSky(){
+    const sky=document.getElementById("sky");
+    if(!sky) return;
+    // tint the gradient toward grey when cloudy/rainy, warm when clear
+    const dark = document.documentElement.getAttribute("data-theme")==="dark";
+    if(mode==="rain"||mode==="storm"){
+      sky.style.background = dark
+        ? "linear-gradient(160deg,#0b0e13 0%,#10151c 55%,#161b22 100%)"
+        : "linear-gradient(160deg,#222a36 0%,#2b333f 55%,#333a44 100%)";
+    } else if(mode==="cloud"){
+      sky.style.background = dark
+        ? "linear-gradient(160deg,#0e1219 0%,#161c25 55%,#1c222b 100%)"
+        : "linear-gradient(160deg,#2a313c 0%,#39414c 55%,#454d57 100%)";
+    } else { // clear -> dawn warmth
+      sky.style.background = dark
+        ? "linear-gradient(160deg,#0d1016 0%,#141a24 45%,#241a0f 100%)"
+        : "linear-gradient(160deg,#1f2733 0%,#3a3a44 40%,#5a4326 100%)";
+    }
+  }
+
+  function classify(){
+    // raining?  -> S.rains last value or fxRain; cloud -> S.cloud near now; sun -> S.suns
+    try{
+      const SS = (typeof S!=="undefined" && S) ? S : (window.S||null);
+      if(!SS) { mode="clear"; }
+      const rains=(SS&&SS.rains)||[];
+      const lastR = rains.length?rains[rains.length-1].v:0;
+      const fxR = (SS&&SS.fxRain)||0;
+      let cloudNow=null;
+      if(SS&&SS.cloud){ const h=Math.floor(((Date.now()+9*3600*1000)/3600000)%24); const c=SS.cloud[h]; if(c!=null) cloudNow=c; }
+      let sunFrac=null;
+      const suns=(SS&&SS.suns)||[];
+      if(suns.length){ const last=suns[suns.length-1]; const rec=suns.filter(x=>x.t>last.t-1); if(rec.length) sunFrac=rec.reduce((a,b)=>a+b.v,0)/(rec.length*10); }
+
+      if(lastR>0.5 || fxR>=2){ mode = (lastR>2||fxR>=6)?"storm":"rain"; intensity=Math.min(1,Math.max(0.4,(lastR||fxR)/6)); }
+      else if((cloudNow!=null && cloudNow>=60) || (sunFrac!=null && sunFrac<0.35)){ mode="cloud"; intensity=cloudNow!=null?cloudNow/100:0.7; }
+      else { mode="clear"; intensity=0.4; }
+
+      // wind push from station feed if present
+      const w=(SS&&SS.winds)||[];
+      if(w.length && w[w.length-1].spd!=null) windPush=Math.max(0.05,Math.min(0.6,w[w.length-1].spd/12));
+    }catch(e){ mode="clear"; }
+
+    if(mode==="rain"||mode==="storm") makeRain(Math.round(160+intensity*420));
+    if(mode==="cloud"||mode==="clear") makeClouds(mode==="cloud"?9:4);
+    setSky();
+    const badge=document.getElementById("wx-badge");
+    if(badge) badge.textContent = ({clear:"☀ clear",cloud:"☁ cloudy",rain:"☂ rain",storm:"⛈ heavy rain"})[mode];
+  }
+
+  let flash=0;
+  function frame(t){
+    const dt=Math.min(0.05,(t-last)/1000); last=t;
+    ctx.clearRect(0,0,W,Hh);
+
+    if(mode==="cloud"||mode==="clear"){
+      for(const c of clouds){
+        c.x+=c.v*dt*10*(0.4+windPush);
+        if(c.x-c.r>W) c.x=-c.r;
+        const g=ctx.createRadialGradient(c.x,c.y,0,c.x,c.y,c.r);
+        g.addColorStop(0,`rgba(220,225,232,${c.a})`); g.addColorStop(1,"rgba(220,225,232,0)");
+        ctx.fillStyle=g; ctx.beginPath(); ctx.arc(c.x,c.y,c.r,0,7); ctx.fill();
+      }
+      if(mode==="clear"){ // soft sun glow upper area
+        const g=ctx.createRadialGradient(W*0.5,Hh*0.05,0,W*0.5,Hh*0.05,Hh*0.5);
+        g.addColorStop(0,"rgba(255,200,120,0.10)"); g.addColorStop(1,"rgba(255,200,120,0)");
+        ctx.fillStyle=g; ctx.fillRect(0,0,W,Hh);
+      }
+    }
+
+    if(mode==="rain"||mode==="storm"){
+      ctx.strokeStyle="rgba(170,200,230,0.45)"; ctx.lineWidth=1;
+      const slant=windPush*60;
+      for(const d of drops){
+        d.y+=d.v*dt; d.x+=slant*dt;
+        if(d.y>Hh){ d.y=-d.l; d.x=Math.random()*W; }
+        ctx.globalAlpha=d.w; ctx.beginPath(); ctx.moveTo(d.x,d.y); ctx.lineTo(d.x+slant*0.06,d.y+d.l); ctx.stroke();
+      }
+      ctx.globalAlpha=1;
+      if(mode==="storm"){
+        flash-=dt;
+        if(flash<=0 && Math.random()<0.012){ flash=0.18; }
+        if(flash>0){ ctx.fillStyle=`rgba(255,255,255,${flash*0.6})`; ctx.fillRect(0,0,W,Hh); }
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+  classify();
+  requestAnimationFrame(frame);
+  // reclassify whenever data refreshes (piggyback the 5-min cycle + a 60s poll)
+  setInterval(classify, 60*1000);
+  window.addEventListener("focus", classify);
+})();

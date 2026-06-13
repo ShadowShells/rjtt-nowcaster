@@ -173,3 +173,35 @@ td.proj{font-weight:600}
   .flash{animation:flash .6s ease}
   @keyframes flash{from{background:rgba(215,71,46,.12)}to{background:transparent}}
 }
+
+
+/* ============ live weather background + glass ============ */
+#sky{position:fixed; inset:0; z-index:-3; transition:background 1.5s ease;
+  background:linear-gradient(160deg,#1b2330 0%,#222c3a 45%,#2b2417 100%);}
+[data-theme="dark"] #sky{background:linear-gradient(160deg,#0d1016 0%,#141a24 50%,#1a1206 100%);}
+#wx{position:fixed; inset:0; z-index:-2; pointer-events:none}
+/* a soft vignette so panels read against any sky */
+body::before{content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+  background:radial-gradient(120% 90% at 50% 0%, rgba(0,0,0,0) 40%, rgba(8,10,14,.45) 100%);}
+
+/* turn the chart-stamp panels into frosted glass */
+.panel, .masthead, .readouts, .settle, .banner{
+  background:rgba(27,31,38,.62) !important;
+  backdrop-filter:blur(14px) saturate(1.1); -webkit-backdrop-filter:blur(14px) saturate(1.1);
+  border:1px solid rgba(255,255,255,.10) !important;
+  border-radius:16px; box-shadow:0 8px 30px rgba(0,0,0,.35);
+  overflow:hidden;
+}
+[data-theme="dark"] .panel, [data-theme="dark"] .masthead, [data-theme="dark"] .readouts{
+  background:rgba(16,20,28,.60) !important;
+}
+/* internal dividers softer on glass */
+.panel-head, .readouts>div, .settle-side, .signals>div, .account-box .row{border-color:rgba(255,255,255,.08) !important}
+.masthead{border-radius:16px}
+.masthead .id{border-right-color:rgba(255,255,255,.10) !important}
+.sheet{max-width:1080px}
+/* keep numbers crisp: text stays full-strength */
+body{color:#EAEFF5}
+.big, .mid, h1, h2{text-shadow:0 1px 12px rgba(0,0,0,.35)}
+/* the grid background of the body is distracting over a sky — hide it */
+body{background-image:none !important}
