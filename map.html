@@ -58,19 +58,24 @@ body{font-family:var(--mono); background:var(--paper); color:var(--ink); overflo
 </head>
 <body>
 <div id="map"></div>
+<canvas id="cloudCv" style="position:absolute;inset:0;z-index:300;pointer-events:none;opacity:.62"></canvas>
+<canvas id="flowCv"  style="position:absolute;inset:0;z-index:350;pointer-events:none"></canvas>
 
 <div class="bar">
   <div class="title"><a href="index.html">← RJTT Nowcaster</a> · Tokyo Bay live map</div>
   <div class="spacer"></div>
+  <span class="chip on" id="t-cloud"><span class="dot"></span>Cloud</span>
+  <span class="chip" id="t-flow"><span class="dot"></span>Wind flow</span>
   <span class="chip on" id="t-radar"><span class="dot"></span>Rain radar</span>
-  <span class="chip on" id="t-wind"><span class="dot"></span>Wind</span>
-  <span class="chip on" id="t-breeze"><span class="dot"></span>Sea-breeze front</span>
+  <span class="chip on" id="t-wind"><span class="dot"></span>Barbs</span>
+  <span class="chip on" id="t-breeze"><span class="dot"></span>Front</span>
 </div>
 
 <div class="legend" id="legend">
   <div><b>Temp</b> (°C): <span class="sw" style="background:linear-gradient(90deg,#3A6FB0,#7FB07F,#E7B53C,#E0795F,#C0392B)"></span></div>
   <div style="margin-top:4px"><b>Wind barb</b> points the way the wind blows; ticks = speed</div>
-  <div style="margin-top:4px"><b>Blue tint</b> = stations on onshore (bay) flow — behind the sea-breeze front</div>
+  <div style="margin-top:4px"><b>Grey haze</b> = cloud cover (Open-Meteo grid) · <b>streaks</b> = live 10-m wind flow</div>
+  <div style="margin-top:4px"><b>Blue tint</b> = stations on onshore (bay) flow — behind the sea-breeze front · <a href="https://himawari8.nict.go.jp/" target="_blank" rel="noopener" style="color:var(--jma)">Himawari true-color ↗</a></div>
 </div>
 <div class="foot" id="foot">loading…</div>
 
@@ -214,6 +219,119 @@ async function loadRadar(){
   }catch(e){ return null; }
 }
 
+// ================= gridded wind + cloud field (Open-Meteo) =================
+// Bounding box around Tokyo Bay; a coarse grid is plenty for a smooth field.
+const GRID = {latN:36.05, latS:35.10, lonW:139.20, lonE:140.35, nx:9, ny:8};
+let FIELD=null; // {us, vs, clouds, ...}
+
+async function loadField(){
+  const lats=[], lons=[];
+  for(let j=0;j<GRID.ny;j++) lats.push(GRID.latN + (GRID.latS-GRID.latN)*j/(GRID.ny-1));
+  for(let i=0;i<GRID.nx;i++) lons.push(GRID.lonW + (GRID.lonE-GRID.lonW)*i/(GRID.nx-1));
+  const latList=[], lonList=[];
+  for(const la of lats) for(const lo of lons){ latList.push(la.toFixed(3)); lonList.push(lo.toFixed(3)); }
+  const url=`https://api.open-meteo.com/v1/forecast?latitude=${latList.join(",")}&longitude=${lonList.join(",")}`
+    +`&current=wind_speed_10m,wind_direction_10m,cloud_cover&wind_speed_unit=ms&timezone=Asia%2FTokyo`;
+  try{
+    const r=await fetch(url,{cache:"no-store"}); if(!r.ok) throw 0;
+    const j=await r.json();
+    const arr = Array.isArray(j) ? j : [j];   // multi-point returns an array
+    const us=[], vs=[], cl=[];
+    for(const pt of arr){
+      const c=pt.current||{};
+      const sp=c.wind_speed_10m??0, dir=c.wind_direction_10m??0;
+      const rad=dir*Math.PI/180;
+      // meteorological: dir is FROM; velocity points TO = opposite
+      us.push(-Math.sin(rad)*sp); vs.push(-Math.cos(rad)*sp);
+      cl.push(c.cloud_cover==null?null:c.cloud_cover);
+    }
+    FIELD={lats,lons,us,vs,cl,nx:GRID.nx,ny:GRID.ny};
+    drawCloud();
+  }catch(e){ FIELD=null; }
+}
+
+// bilinear sample of the grid at (lat,lon) -> {u,v} in m/s, or null outside
+function sampleWind(lat,lon){
+  if(!FIELD) return null;
+  const {lats,lons,us,vs,nx,ny}=FIELD;
+  if(lat>lats[0]||lat<lats[ny-1]||lon<lons[0]||lon>lons[nx-1]) return null;
+  let j=0; while(j<ny-1 && lat<lats[j+1]) j++;
+  let i=0; while(i<nx-1 && lon>lons[i+1]) i++;
+  const fy=(lats[j]-lat)/(lats[j]-lats[j+1]||1), fx=(lon-lons[i])/(lons[i+1]-lons[i]||1);
+  const idx=(jj,ii)=>jj*nx+ii;
+  const lerp=(a,b,f)=>a+(b-a)*f;
+  const u=lerp(lerp(us[idx(j,i)],us[idx(j,i+1)],fx), lerp(us[idx(j+1,i)],us[idx(j+1,i+1)],fx), fy);
+  const v=lerp(lerp(vs[idx(j,i)],vs[idx(j,i+1)],fx), lerp(vs[idx(j+1,i)],vs[idx(j+1,i+1)],fx), fy);
+  return {u,v};
+}
+
+// ---- cloud raster (smooth grey from the grid) ----
+const cloudCv=document.getElementById("cloudCv"), cloudCtx=cloudCv.getContext("2d");
+function sampleCloud(lat,lon){
+  if(!FIELD) return null;
+  const {lats,lons,cl,nx,ny}=FIELD;
+  if(lat>lats[0]||lat<lats[ny-1]||lon<lons[0]||lon>lons[nx-1]) return null;
+  let j=0; while(j<ny-1 && lat<lats[j+1]) j++;
+  let i=0; while(i<nx-1 && lon>lons[i+1]) i++;
+  const fy=(lats[j]-lat)/(lats[j]-lats[j+1]||1), fx=(lon-lons[i])/(lons[i+1]-lons[i]||1);
+  const idx=(jj,ii)=>jj*nx+ii;
+  const vals=[cl[idx(j,i)],cl[idx(j,i+1)],cl[idx(j+1,i)],cl[idx(j+1,i+1)]];
+  if(vals.some(v=>v==null)) return null;
+  const lerp=(a,b,f)=>a+(b-a)*f;
+  return lerp(lerp(vals[0],vals[1],fx), lerp(vals[2],vals[3],fx), fy);
+}
+let cloudOn=true;
+function drawCloud(){
+  const size=map.getSize(); cloudCv.width=size.x; cloudCv.height=size.y;
+  cloudCtx.clearRect(0,0,size.x,size.y);
+  if(!cloudOn||!FIELD) return;
+  const step=14;
+  for(let y=0;y<size.y;y+=step){
+    for(let x=0;x<size.x;x+=step){
+      const ll=map.containerPointToLatLng([x,y]);
+      const c=sampleCloud(ll.lat,ll.lng);
+      if(c==null) continue;
+      const a=Math.max(0,(c-8)/100)*0.9;            // clearer skies => transparent
+      cloudCtx.fillStyle=`rgba(225,230,236,${a.toFixed(3)})`;
+      cloudCtx.fillRect(x-1,y-1,step+2,step+2);
+    }
+  }
+}
+
+// ---- wind particle animation ----
+const flowCv=document.getElementById("flowCv"), flowCtx=flowCv.getContext("2d");
+let particles=[], flowOn=false, flowRAF=null;
+const N_PART=520;
+function resizeFlow(){ const s=map.getSize(); flowCv.width=s.x; flowCv.height=s.y; }
+function seed(p){ const s=map.getSize(); p.x=Math.random()*s.x; p.y=Math.random()*s.y; p.age=Math.random()*60; }
+function initParticles(){ particles=[]; for(let k=0;k<N_PART;k++){const p={};seed(p);particles.push(p);} }
+function stepFlow(){
+  if(!flowOn){ flowRAF=null; return; }
+  const s=map.getSize();
+  flowCtx.globalCompositeOperation="destination-out";
+  flowCtx.fillStyle="rgba(0,0,0,0.10)"; flowCtx.fillRect(0,0,s.x,s.y); // fade trails
+  flowCtx.globalCompositeOperation="source-over";
+  flowCtx.lineWidth=1.4;
+  for(const p of particles){
+    const ll=map.containerPointToLatLng([p.x,p.y]);
+    const w=sampleWind(ll.lat,ll.lng);
+    if(!w||p.age>60){ seed(p); continue; }
+    // m/s -> pixels: scale by zoom so it reads at any level
+    const sc=0.45*Math.pow(1.35, map.getZoom()-10);
+    const nx=p.x+w.u*sc, ny=p.y-w.v*sc;       // screen y is inverted vs north
+    const spd=Math.hypot(w.u,w.v);
+    flowCtx.strokeStyle=`rgba(120,200,235,${Math.min(.9,0.25+spd/14)})`;
+    flowCtx.beginPath(); flowCtx.moveTo(p.x,p.y); flowCtx.lineTo(nx,ny); flowCtx.stroke();
+    p.x=nx; p.y=ny; p.age++;
+    if(p.x<0||p.x>s.x||p.y<0||p.y>s.y) seed(p);
+  }
+  flowRAF=requestAnimationFrame(stepFlow);
+}
+function startFlow(){ if(flowRAF) return; resizeFlow(); if(!particles.length) initParticles(); flowOn=true; stepFlow(); }
+function stopFlow(){ flowOn=false; if(flowRAF){cancelAnimationFrame(flowRAF);flowRAF=null;} flowCtx.clearRect(0,0,flowCv.width,flowCv.height); }
+
+map.on("move zoom resize", ()=>{ drawCloud(); if(flowOn){ resizeFlow(); } });
+
 // ---- toggles ----
 function wireToggle(id, on){
   const el=document.getElementById(id);
@@ -223,14 +341,17 @@ function wireToggle(id, on){
     if(id==="t-radar"){ if(radarLayer){ active?radarLayer.addTo(map):map.removeLayer(radarLayer);} }
     if(id==="t-wind"){ layerWind=active; refresh(); }
     if(id==="t-breeze"){ layerBreeze=active; refresh(); }
+    if(id==="t-cloud"){ cloudOn=active; drawCloud(); }
+    if(id==="t-flow"){ active?startFlow():stopFlow(); }
   });
 }
-wireToggle("t-radar"); wireToggle("t-wind"); wireToggle("t-breeze");
+wireToggle("t-cloud"); wireToggle("t-flow"); wireToggle("t-radar"); wireToggle("t-wind"); wireToggle("t-breeze");
 
 let lastData=[];
 async function refresh(){
   lastData = await loadStations();
   render(lastData);
+  await loadField();
   const vt = await loadRadar();
   const onN = lastData.filter(d=>d.wd!=null&&d.wd!==0&&ONSHORE.has(((d.wd-1+16)%16))).length;
   document.getElementById("foot").textContent =
