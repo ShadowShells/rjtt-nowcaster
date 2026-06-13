@@ -54,6 +54,31 @@ body{font-family:var(--mono); background:var(--paper); color:var(--ink); overflo
 .leaflet-container a.leaflet-popup-close-button{color:var(--ink-soft)}
 .leaflet-bar a{background:var(--panel); color:var(--ink); border-bottom-color:var(--hairline)}
 .leaflet-bar a:hover{background:#252b34}
+
+/* ===== frosted glass to match the dashboard ===== */
+.bar .chip{
+  background:rgba(27,31,38,.55); backdrop-filter:blur(12px) saturate(1.1); -webkit-backdrop-filter:blur(12px) saturate(1.1);
+  border:1px solid rgba(255,255,255,.12); border-radius:13px; box-shadow:0 4px 18px rgba(0,0,0,.4);
+}
+.bar .chip.on{border-color:rgba(91,175,208,.7)}
+.bar .title{background:rgba(27,31,38,.55); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+  border:1px solid rgba(255,255,255,.10); border-radius:13px; padding:7px 13px; box-shadow:0 4px 18px rgba(0,0,0,.4)}
+.legend{
+  background:rgba(20,23,28,.55) !important; backdrop-filter:blur(14px) saturate(1.1); -webkit-backdrop-filter:blur(14px) saturate(1.1);
+  border:1px solid rgba(255,255,255,.12) !important; border-radius:14px; box-shadow:0 6px 22px rgba(0,0,0,.4);
+}
+.foot{background:rgba(20,23,28,.5); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+  border:1px solid rgba(255,255,255,.08); border-radius:10px}
+.leaflet-popup-content-wrapper{
+  background:rgba(27,31,38,.78) !important; backdrop-filter:blur(16px) saturate(1.1); -webkit-backdrop-filter:blur(16px) saturate(1.1);
+  border:1px solid rgba(255,255,255,.14) !important; border-radius:14px; box-shadow:0 8px 28px rgba(0,0,0,.45);
+}
+.leaflet-popup-tip{background:rgba(27,31,38,.78) !important; backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px)}
+.leaflet-bar{border-radius:12px !important; overflow:hidden; box-shadow:0 4px 18px rgba(0,0,0,.4)}
+.leaflet-bar a{background:rgba(27,31,38,.62); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); border-bottom-color:rgba(255,255,255,.1)}
+.leaflet-bar a:hover{background:rgba(40,46,54,.8)}
+/* station label chips a touch glassy too */
+.stn .lab{backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px)}
 </style>
 </head>
 <body>
