@@ -1444,7 +1444,41 @@ function drawSounding(){
   for(const r of lv){ tmin=Math.min(tmin,r.td!=null?r.td:r.t,r.t); tmax=Math.max(tmax,r.t); }
   tmin=Math.floor(tmin)-3; tmax=Math.ceil(tmax)+3;
   const X=t=>L+pw*(t-tmin)/(tmax-tmin);
+
+  // ---- parcel ascent (compute BEFORE drawing so we can shade the mixed layer) ----
+  const sfc=lv[0];
+  const sfcMax = (S.obsMax!=null) ? Math.max(sfc.t, S.obsMax) : sfc.t;
+  // dry adiabat from the surface parcel: T(z) = sfcMax - 9.8*(z-z0)/1000
+  function adiabatT(p){
+    // interpolate height at pressure p from the level array
+    let zz=null;
+    for(let i=0;i<lv.length-1;i++){
+      const a=lv[i], b=lv[i+1];
+      if((p<=a.p && p>=b.p)||(p>=a.p && p<=b.p)){
+        const f=(Math.log(p)-Math.log(a.p))/(Math.log(b.p)-Math.log(a.p));
+        zz=a.z+(b.z-a.z)*f; break;
+      }
+    }
+    if(zz==null) zz=lv[lv.length-1].z;
+    return sfcMax - 9.8*(zz-sfc.z)/1000;
+  }
+  let mixP=null, mixZ=null;
+  for(let i=1;i<lv.length;i++){
+    const dz=(lv[i].z - sfc.z)/1000;
+    const parcelT = sfcMax - 9.8*dz;
+    if(parcelT <= lv[i].t){ mixP=lv[i].p; mixZ=Math.round(lv[i].z - sfc.z); break; }
+  }
+  let inv=null;
+  for(let i=1;i<lv.length;i++){ if(lv[i].t > lv[i-1].t + 0.3){ inv={p0:lv[i-1].p,p1:lv[i].p,z0:Math.round(lv[i-1].z-sfc.z)}; break; } }
+
   let g="";
+  // shade the mixed layer (surface up to mixing-height pressure)
+  if(mixP!=null){
+    const yTop=Y(mixP), yBot=Y(pBot);
+    g+=`<rect x="${L}" y="${yTop}" width="${pw}" height="${(yBot-yTop).toFixed(1)}" style="fill:rgba(215,71,46,.07)"/>`;
+    g+=`<line x1="${L}" y1="${yTop}" x2="${L+pw}" y2="${yTop}" style="stroke:var(--accent);stroke-width:1.2;stroke-dasharray:5 4;opacity:.7"/>`;
+    g+=`<text x="${L+8}" y="${yTop-6}" font-size="10.5" style="fill:var(--accent);font-weight:600">mixed layer top ≈ ${mixZ} m</text>`;
+  }
   // grid
   for(const p of [1000,925,850,700,600,500]){
     g+=`<line x1="${L}" y1="${Y(p)}" x2="${L+pw}" y2="${Y(p)}" style="stroke:var(--grid);stroke-width:1"/>`;
@@ -1458,6 +1492,15 @@ function drawSounding(){
     const pts=lv.filter(r=>r[key]!=null).map(r=>`${X(r[key]).toFixed(1)},${Y(r.p).toFixed(1)}`).join(" ");
     return pts?`<polyline points="${pts}" fill="none" style="stroke:${color};stroke-width:${w}"/>`:"";
   };
+  // dry adiabat the surface parcel follows (from surface up to mixing top)
+  {
+    const pts=[];
+    for(const r of lv){
+      if(mixP!=null && r.p < mixP) break;     // only draw up to the cap
+      pts.push(`${X(adiabatT(r.p)).toFixed(1)},${Y(r.p).toFixed(1)}`);
+    }
+    if(pts.length>1) g+=`<polyline points="${pts.join(' ')}" fill="none" style="stroke:#E7B53C;stroke-width:1.6;stroke-dasharray:6 4;opacity:.85"/>`;
+  }
   // dewpoint then temperature
   g+=line("td","var(--jma)",2.2);
   g+=line("t","var(--accent)",2.6);
@@ -1472,26 +1515,14 @@ function drawSounding(){
   }
   svg.innerHTML=g;
 
-  // ---- analysis: mixing height + inversion + ceiling check ----
-  const sfc=lv[0];
-  // surface parcel dry-adiabatic ascent: T_parcel(p) = T_sfc * (p/p_sfc)^(R/cp), simpler in height: -9.8C/km
-  // find where environmental T meets the dry adiabat from the (forecast) surface max
-  const sfcMax = (S.sounding && S.obsMax!=null) ? Math.max(sfc.t, S.obsMax) : sfc.t;
-  let mixP=null, mixZ=null;
-  for(let i=1;i<lv.length;i++){
-    const dz=(lv[i].z - sfc.z)/1000;
-    const parcelT = sfcMax - 9.8*dz;            // dry adiabat from surface
-    if(parcelT <= lv[i].t){ mixP=lv[i].p; mixZ=Math.round(lv[i].z - sfc.z); break; }
-  }
-  // inversion: any layer where T increases with height
-  let inv=null;
-  for(let i=1;i<lv.length;i++){ if(lv[i].t > lv[i-1].t + 0.3){ inv={p0:lv[i-1].p,p1:lv[i].p,z0:Math.round(lv[i-1].z-sfc.z)}; break; } }
+  // ---- caption ----
   const parts=[];
   parts.push(`valid ~${p2(S0.validH)}:00 JST`);
   if(mixZ!=null) parts.push(`mixing height ≈ ${mixZ} m (to ${mixP} hPa)`);
   else parts.push(`deep mixing — no cap found below 500 hPa`);
   if(inv) parts.push(`⚠ inversion ${inv.p0}→${inv.p1} hPa (~${inv.z0} m) — lid on surface heating, suppresses the max`);
   else parts.push(`no low-level inversion — surface can mix freely toward the T850 ceiling`);
+  parts.push(`shaded band = mixed layer · gold dashes = the dry adiabat a surface parcel follows`);
   if(note) note.innerHTML = parts.join(" · ");
 }
 
