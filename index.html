@@ -16,6 +16,15 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Shippori+Mincho:wght@600;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
+<script>
+(function(){
+  try{
+    var saved = localStorage.getItem("rjtt_theme");
+    var dark = saved ? saved==="dark" : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    if(dark) document.documentElement.setAttribute("data-theme","dark");
+  }catch(e){}
+})();
+</script>
 </head>
 <body>
 <div class="sheet">
@@ -31,6 +40,7 @@
       <div class="row"><span>DATE (JST)</span><b id="m-date">—</b></div>
       <div class="row"><span>UPDATED</span><b id="m-updated">—</b></div>
       <button class="refresh" id="btn-refresh">Refresh data</button>
+      <button class="theme" id="btn-theme" aria-label="Toggle dark mode">◐ Theme</button>
     </div>
   </header>
 
@@ -271,5 +281,25 @@
   </p>
 </div>
 <script src="app.js"></script>
+<script>
+(function(){
+  var btn = document.getElementById("btn-theme");
+  if(!btn) return;
+  var meta = document.querySelector('meta[name="theme-color"]');
+  function sync(){
+    var dark = document.documentElement.getAttribute("data-theme")==="dark";
+    btn.textContent = dark ? "\u25D1 Light" : "\u25D0 Dark";
+    if(meta) meta.setAttribute("content", dark ? "#14171C" : "#EFF2EE");
+  }
+  btn.addEventListener("click", function(){
+    var dark = document.documentElement.getAttribute("data-theme")==="dark";
+    if(dark){ document.documentElement.removeAttribute("data-theme"); }
+    else { document.documentElement.setAttribute("data-theme","dark"); }
+    try{ localStorage.setItem("rjtt_theme", dark ? "light" : "dark"); }catch(e){}
+    sync();
+  });
+  sync();
+})();
+</script>
 </body>
 </html>
