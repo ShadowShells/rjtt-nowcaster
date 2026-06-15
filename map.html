@@ -83,8 +83,6 @@ body{font-family:var(--mono); background:var(--paper); color:var(--ink); overflo
 </head>
 <body>
 <div id="map"></div>
-<canvas id="cloudCv" style="position:absolute;inset:0;z-index:650;pointer-events:none;opacity:.62"></canvas>
-<canvas id="flowCv"  style="position:absolute;inset:0;z-index:660;pointer-events:none"></canvas>
 
 <div class="bar">
   <div class="title"><a href="index.html">← RJTT Nowcaster</a> · Tokyo Bay live map</div>
@@ -124,6 +122,26 @@ const STATIONS = [
 const ONSHORE = new Set([4,5,6,7,8,9]); // E..SSW (16-pt index)
 
 const map = L.map("map", {zoomControl:true, attributionControl:false}).setView([35.62, 139.80], 10);
+
+// dedicated overlay pane for the weather canvases, sitting above tiles+markers
+map.createPane("wxPane");
+map.getPane("wxPane").style.zIndex = 640;
+map.getPane("wxPane").style.pointerEvents = "none";
+const _wxPane = map.getPane("wxPane");
+const cloudCv = document.createElement("canvas");
+cloudCv.id = "cloudCv";
+cloudCv.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;opacity:.62";
+const flowCv = document.createElement("canvas");
+flowCv.id = "flowCv";
+flowCv.style.cssText = "position:absolute;left:0;top:0;pointer-events:none";
+_wxPane.appendChild(cloudCv);
+_wxPane.appendChild(flowCv);
+// keep canvases pinned to the top-left of the viewport as the map pane translates
+function pinCanvases(){
+  const tl = map.containerPointToLayerPoint([0,0]);
+  for(const c of [cloudCv, flowCv]){ c.style.left = tl.x + "px"; c.style.top = tl.y + "px"; }
+}
+map.on("move zoom moveend zoomend viewreset", pinCanvases);
 // dark basemap (free, no key)
 L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
   maxZoom: 19, subdomains:"abcd"
@@ -291,7 +309,7 @@ function sampleWind(lat,lon){
 }
 
 // ---- cloud raster (smooth grey from the grid) ----
-const cloudCv=document.getElementById("cloudCv"), cloudCtx=cloudCv.getContext("2d");
+const cloudCtx=cloudCv.getContext("2d");
 function sampleCloud(lat,lon){
   if(!FIELD) return null;
   const {lats,lons,cl,nx,ny}=FIELD;
@@ -324,7 +342,7 @@ function drawCloud(){
 }
 
 // ---- wind particle animation ----
-const flowCv=document.getElementById("flowCv"), flowCtx=flowCv.getContext("2d");
+const flowCtx=flowCv.getContext("2d");
 let particles=[], flowOn=false, flowRAF=null;
 const N_PART=520;
 function resizeFlow(){ const s=map.getSize(); flowCv.width=s.x; flowCv.height=s.y; }
@@ -355,7 +373,7 @@ function stepFlow(){
 function startFlow(){ if(flowRAF) return; resizeFlow(); if(!particles.length) initParticles(); flowOn=true; stepFlow(); }
 function stopFlow(){ flowOn=false; if(flowRAF){cancelAnimationFrame(flowRAF);flowRAF=null;} flowCtx.clearRect(0,0,flowCv.width,flowCv.height); }
 
-map.on("move zoom resize", ()=>{ drawCloud(); if(flowOn){ resizeFlow(); } });
+map.on("move zoom resize", ()=>{ pinCanvases(); drawCloud(); if(flowOn){ resizeFlow(); } });
 
 // ---- toggles ----
 function wireToggle(id, on){
