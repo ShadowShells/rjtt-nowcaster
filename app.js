@@ -1037,6 +1037,42 @@ function setChip(id, ok, label){
   el.classList.toggle("ok", ok); el.classList.toggle("bad", !ok);
   if(label) el.lastChild.textContent = label;
 }
+function heroHeadline(){
+  // phrase from the live weather mode the background engine detects, plus a temp descriptor
+  let mode="clear";
+  try{
+    const rains=(S.rains)||[]; const lastR=rains.length?rains[rains.length-1].v:0; const fxR=S.fxRain||0;
+    let cloudNow=null; if(S.cloud){ const h=Math.floor(((Date.now()+9*3600*1000)/3600000)%24); const c=S.cloud[h]; if(c!=null) cloudNow=c; }
+    let sunFrac=null; const suns=(S.suns)||[]; if(suns.length){ const last=suns[suns.length-1]; const rec=suns.filter(x=>x.t>last.t-1); if(rec.length) sunFrac=rec.reduce((a,b)=>a+b.v,0)/(rec.length*10); }
+    if(lastR>0.5||fxR>=2){ mode=(lastR>2||fxR>=6)?"storm":"rain"; }
+    else if((cloudNow!=null&&cloudNow>=60)||(sunFrac!=null&&sunFrac<0.35)){ mode="cloud"; }
+    else mode="clear";
+  }catch(e){}
+  const map={ clear:"Clear Skies", cloud:"Cloudy", rain:"Rain Showers", storm:"Storm with Heavy Rain" };
+  return {mode, text: map[mode]||"—"};
+}
+function updateHero(nc){
+  const set=(id,v)=>{const e=document.getElementById(id); if(e) e.textContent=v;};
+  const hh=heroHeadline();
+  set("hero-headline", hh.text);
+  set("hero-temp", S.cur!=null ? fmt1(S.cur) : "—");
+  set("hero-high", nc && nc.high!=null ? fmt1(nc.high)+"°" : "—");
+  // floor
+  let floor = (S.metarMax!=null) ? Math.round(S.metarMax) : (S.obsMax!=null? Math.round(S.obsMax):null);
+  set("hero-floor", floor!=null ? floor+"°" : "—");
+  // verdict bucket (recompute lightweight)
+  let vtxt="—";
+  try{ const bk=computeBuckets(nc); if(bk&&bk.buckets.length){ const top=bk.buckets.reduce((a,b)=>b.p>a.p?b:a); vtxt=top.k+"°"; } }catch(e){}
+  const vEl=document.getElementById("hero-verdict"); if(vEl){ vEl.textContent=vtxt; vEl.classList.add("accent"); }
+  // subtitle reflects time-to-peak
+  const sub=document.getElementById("hero-sub");
+  if(sub){
+    const now=jstParts().dec;
+    if(nc && nc.peakSet) sub.textContent="peak has passed — settling";
+    else if(nc && nc.peakT!=null){ const hrs=Math.max(0,nc.peakT-now); sub.textContent=`~${hrs.toFixed(1)} h to expected peak`; }
+    else sub.textContent="live nowcast of today’s maximum";
+  }
+}
 function render(nc){
   S.analog = computeAnalogs();
   try{ window.S = S; }catch(e){}
@@ -1045,6 +1081,8 @@ function render(nc){
   document.getElementById("m-updated").textContent = `${hhmm(t.dec)}:${p2(t.s)} JST`;
   const thM = document.getElementById("th-modelnow");
   if(thM) thM.textContent = `Model @ ${hhmm(Math.min(t.dec,23.99))}`;
+
+  updateHero(nc);
 
   // readouts
   const elN = document.getElementById("r-nowcast");

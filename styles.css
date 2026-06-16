@@ -205,3 +205,36 @@ body{color:#EAEFF5}
 .big, .mid, h1, h2{text-shadow:0 1px 12px rgba(0,0,0,.35)}
 /* the grid background of the body is distracting over a sky — hide it */
 body{background-image:none !important}
+
+
+/* ============ WeatherCover hero header ============ */
+.hero{
+  position:relative; display:flex; justify-content:space-between; align-items:flex-end; gap:30px;
+  padding:46px 40px 38px; margin-bottom:18px; min-height:230px;
+  border-radius:20px; overflow:hidden;
+  background:rgba(20,23,28,.30);
+  backdrop-filter:blur(6px) saturate(1.05); -webkit-backdrop-filter:blur(6px) saturate(1.05);
+  border:1px solid rgba(255,255,255,.10);
+  box-shadow:0 10px 40px rgba(0,0,0,.35);
+}
+.hero-kicker{font-family:var(--mono); font-size:12px; letter-spacing:.22em; text-transform:uppercase; color:var(--ink-soft); margin-bottom:14px}
+.hero-headline{
+  font-family:var(--disp); font-weight:800; line-height:.98; letter-spacing:-.01em;
+  font-size:clamp(40px, 6vw, 78px); color:#fff; text-shadow:0 2px 24px rgba(0,0,0,.45);
+  max-width:14ch;
+}
+.hero-sub{font-family:var(--mono); font-size:13px; color:var(--ink-soft); margin-top:16px; letter-spacing:.02em}
+.hero-right{display:flex; flex-direction:column; align-items:flex-end; gap:18px; text-align:right}
+.hero-now{display:flex; align-items:flex-start; line-height:1}
+.hn-val{font-family:var(--disp); font-weight:800; font-size:clamp(54px,8vw,92px); color:#fff; text-shadow:0 2px 24px rgba(0,0,0,.45)}
+.hn-unit{font-family:var(--disp); font-weight:600; font-size:28px; color:var(--ink-soft); margin-top:8px}
+.hero-stats{display:flex; gap:26px}
+.hero-stats > div{display:flex; flex-direction:column; align-items:flex-end; gap:3px}
+.hs-k{font-family:var(--mono); font-size:10.5px; letter-spacing:.16em; color:var(--ink-soft)}
+.hs-v{font-family:var(--mono); font-size:22px; font-weight:600; color:#fff}
+.hs-v.accent{color:var(--accent)}
+@media (max-width:720px){
+  .hero{flex-direction:column; align-items:flex-start; gap:22px; padding:32px 22px}
+  .hero-right{align-items:flex-start; text-align:left}
+  .hero-stats{gap:20px}
+}
