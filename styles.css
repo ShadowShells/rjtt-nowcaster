@@ -96,14 +96,14 @@ button.refresh:focus-visible, a:focus-visible{outline:3px solid var(--accent); o
 .range-bar .tick{position:absolute; top:-3px; bottom:-3px; width:2px; background:var(--ink)}
 
 /* ---- settlement panel ---- */
-.settle{display:grid; grid-template-columns:280px 1fr; gap:0}
+.settle{display:grid; grid-template-columns:minmax(320px,360px) 1fr; gap:0}
 .settle-side{padding:18px 20px; border-right:1.5px solid var(--hairline)}
 .settle-side .label{font-size:10.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-soft); margin-bottom:8px}
-.settle-buckets{padding:16px 20px; display:flex; flex-direction:column; gap:7px; justify-content:center}
-.bucket{display:grid; grid-template-columns:54px 1fr 52px; align-items:center; gap:10px; font-size:12.5px; font-variant-numeric:tabular-nums}
+.settle-buckets{padding:40px 56px; display:flex; flex-direction:column; gap:14px; justify-content:center; max-width:760px; margin:0 auto; width:100%}
+.bucket{display:grid; grid-template-columns:58px 1fr 54px; align-items:center; gap:16px; font-size:14px; font-variant-numeric:tabular-nums}
 .bucket .bk{font-weight:600}
-.bucket .bbar{height:14px; background:repeating-linear-gradient(90deg,var(--grid) 0 2px,transparent 2px 8px); position:relative}
-.bucket .bbar>div{position:absolute; inset:0 auto 0 0; background:var(--jma); opacity:.85}
+.bucket .bbar{height:22px; border-radius:5px; background:repeating-linear-gradient(90deg,var(--grid) 0 2px,transparent 2px 8px); position:relative}
+.bucket .bbar>div{position:absolute; inset:0 auto 0 0; background:var(--jma); opacity:.85; border-radius:5px; transition:width .5s ease}
 .bucket.top .bbar>div{background:var(--accent)}
 .bucket .bp{text-align:right; color:var(--ink-soft)}
 .bucket.top .bp{color:var(--accent); font-weight:600}
