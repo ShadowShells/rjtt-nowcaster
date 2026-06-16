@@ -332,21 +332,32 @@ function sampleCloud(lat,lon){
   return lerp(lerp(vals[0],vals[1],fx), lerp(vals[2],vals[3],fx), fy);
 }
 let cloudOn=true;
+const _cloudLo = document.createElement("canvas");  // low-res buffer, scaled up smoothly
+const _cloudLoCtx = _cloudLo.getContext("2d");
 function drawCloud(){
   const size=map.getSize(); cloudCv.width=size.x; cloudCv.height=size.y;
   cloudCtx.clearRect(0,0,size.x,size.y);
   if(!cloudOn||!FIELD) return;
-  const step=14;
-  for(let y=0;y<size.y;y+=step){
-    for(let x=0;x<size.x;x+=step){
-      const ll=map.containerPointToLatLng([x,y]);
+  // 1) render the cloud field at LOW resolution (one cell per ~24px) into the small buffer
+  const cell=24;
+  const lw=Math.max(2,Math.ceil(size.x/cell)+1), lh=Math.max(2,Math.ceil(size.y/cell)+1);
+  _cloudLo.width=lw; _cloudLo.height=lh;
+  const img=_cloudLoCtx.createImageData(lw,lh);
+  for(let j=0;j<lh;j++){
+    for(let i=0;i<lw;i++){
+      const ll=map.containerPointToLatLng([i*cell, j*cell]);
       const c=sampleCloud(ll.lat,ll.lng);
-      if(c==null) continue;
-      const a=Math.max(0,(c-8)/100)*0.9;            // clearer skies => transparent
-      cloudCtx.fillStyle=`rgba(225,230,236,${a.toFixed(3)})`;
-      cloudCtx.fillRect(x-1,y-1,step+2,step+2);
+      const idx=(j*lw+i)*4;
+      img.data[idx]=225; img.data[idx+1]=230; img.data[idx+2]=236;
+      img.data[idx+3]= c==null ? 0 : Math.round(Math.max(0,(c-8)/100)*0.9*255);
     }
   }
+  _cloudLoCtx.putImageData(img,0,0);
+  // 2) scale the tiny buffer up to full size — browser does bilinear smoothing -> soft haze
+  cloudCtx.imageSmoothingEnabled=true; cloudCtx.imageSmoothingQuality="high";
+  cloudCtx.filter="blur(8px)";
+  cloudCtx.drawImage(_cloudLo, 0,0,lw,lh, -cell,-cell, (lw+1)*cell, (lh+1)*cell);
+  cloudCtx.filter="none";
 }
 
 // ---- wind particle animation ----
