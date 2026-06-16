@@ -1676,8 +1676,24 @@ setInterval(refresh, REFRESH_MS);
 /* Only registers over http(s) — silently skipped on file:// so local
    double-click still works. */
 if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+  let _reloading = false;
+  // when a new worker activates, it posts SW_UPDATED -> reload once to pick up fresh files
+  navigator.serviceWorker.addEventListener("message", (ev) => {
+    if (ev.data && ev.data.type === "SW_UPDATED" && !_reloading) {
+      _reloading = true;
+      location.reload();
+    }
+  });
+  // if the controlling worker changes (new version took over), reload once
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!_reloading) { _reloading = true; location.reload(); }
+  });
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("sw.js").catch(() => {/* offline shell is optional */});
+    navigator.serviceWorker.register("sw.js").then((reg) => {
+      // check for updates every load and every 60s while open
+      reg.update();
+      setInterval(() => reg.update(), 60 * 1000);
+    }).catch(() => {/* offline shell is optional */});
   });
 }
 
