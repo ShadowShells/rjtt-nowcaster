@@ -733,8 +733,76 @@ function printForecast(nc){
 }
 
 /* ================= journal: record the 10:30 verdict, grade it next day ================= */
+/* ===== Journal storage: browser + optional permanent cloud (Supabase) =====
+   To enable cloud auto-save, paste your project URL and anon key below.
+   Leave them blank to stay browser-only. Setup steps are on the How it works page. */
+const JR_CLOUD = {
+  url: "",      // e.g. "https://abcdefgh.supabase.co"
+  key: "",      // your anon public key
+  table: "rjtt_journal",
+  rowId: "main" // single shared row holding the whole journal blob
+};
+function jrCloudOn(){ return !!(JR_CLOUD.url && JR_CLOUD.key); }
+
 function journalLoad(){ try{ return JSON.parse(localStorage.getItem("rjtt_jr_v1")||"{}"); }catch(e){ return {}; } }
-function journalSave(j){ try{ localStorage.setItem("rjtt_jr_v1", JSON.stringify(j)); }catch(e){} }
+function journalSave(j){
+  try{ localStorage.setItem("rjtt_jr_v1", JSON.stringify(j)); }catch(e){}
+  cloudPush(j);   // fire-and-forget background save to the cloud
+}
+
+// merge two journals: graded days win; otherwise the one with more recorded calls
+function journalMerge(a, b){
+  const out = Object.assign({}, a);
+  for(const k in b){
+    const x=out[k], y=b[k];
+    if(!x){ out[k]=y; continue; }
+    const xg=x.actual!=null, yg=y.actual!=null;
+    if(yg && !xg) out[k]=y;
+    else if(yg===xg){ if((y.calls||[]).length > (x.calls||[]).length) out[k]=y; }
+  }
+  return out;
+}
+
+let _cloudBusy=false, _cloudPending=null;
+async function cloudPush(j){
+  if(!jrCloudOn()) return;
+  if(_cloudBusy){ _cloudPending=j; return; }   // coalesce rapid saves
+  _cloudBusy=true;
+  try{
+    await fetch(`${JR_CLOUD.url}/rest/v1/${JR_CLOUD.table}?on_conflict=id`, {
+      method:"POST",
+      headers:{
+        "apikey":JR_CLOUD.key, "Authorization":`Bearer ${JR_CLOUD.key}`,
+        "Content-Type":"application/json", "Prefer":"resolution=merge-duplicates"
+      },
+      body: JSON.stringify([{ id:JR_CLOUD.rowId, data:j, updated:new Date().toISOString() }])
+    });
+  }catch(e){ /* offline: browser copy still holds */ }
+  _cloudBusy=false;
+  if(_cloudPending){ const p=_cloudPending; _cloudPending=null; cloudPush(p); }
+}
+async function cloudPull(){
+  if(!jrCloudOn()) return null;
+  try{
+    const r=await fetch(`${JR_CLOUD.url}/rest/v1/${JR_CLOUD.table}?id=eq.${JR_CLOUD.rowId}&select=data`, {
+      headers:{ "apikey":JR_CLOUD.key, "Authorization":`Bearer ${JR_CLOUD.key}` }
+    });
+    if(!r.ok) return null;
+    const rows=await r.json();
+    return (rows && rows[0] && rows[0].data) ? rows[0].data : null;
+  }catch(e){ return null; }
+}
+// on startup: pull cloud copy, merge with local, save the union back
+async function cloudSync(){
+  if(!jrCloudOn()) return;
+  const remote=await cloudPull(); if(!remote) { cloudPush(journalLoad()); return; }
+  const merged=journalMerge(journalLoad(), remote);
+  try{ localStorage.setItem("rjtt_jr_v1", JSON.stringify(merged)); }catch(e){}
+  cloudPush(merged);
+  // refresh the panel if it's already rendered
+  const badge=document.getElementById("a-rec-note");
+  if(badge && jrCloudOn()) badge.textContent += " · ☁ cloud-synced";
+}
 function journalTick(bucket, high){
   const now = jstParts().dec; const j = journalLoad(); const k = todayISO();
   let dirty = false;
@@ -791,7 +859,7 @@ function journalStats(j){
 // cloud, flow already onshore) means it was likely a cloud blanket — discount it.
 function morningEvidence(){
   const now = jstParts().dec;
-  const E = {trustWarm:1, reasons:[], capScore:0};
+  const E = {trustWarm:1, reasons:[], capScore:0, mixBreak:false, advect:false};
   if(now < 5.5 || now > 14) return E;
   let cap = 0;
   const su = S.suns || [];
@@ -814,16 +882,50 @@ function morningEvidence(){
       if(avg >= 65){ cap++; E.reasons.push(`forecast cloud ${Math.round(avg)}%`); }
     }
   }
-  if(now < 11){
-    const w = S.winds || [];
-    const lastw = w[w.length-1];
-    if(lastw && lastw.dir!=null && ONSHORE.has(lastw.dir) && (lastw.spd ?? 0) >= 2){
-      cap++; E.reasons.push("flow already onshore");
+  // ===== WIND-SPEED DISCRIMINATOR (today's-miss fix) =====
+  // Onshore/SSW flow is only a CAP when it's gentle (a true sea breeze).
+  // A STRONG onshore/SSW wind (>=6 m/s) is warm advection + downward mixing -> it HEATS.
+  const w = S.winds || [];
+  const lastw = w[w.length-1];
+  const spd = lastw ? (lastw.spd ?? 0) : 0;
+  const onsh = lastw && lastw.dir!=null && lastw.dir!==0 && ONSHORE.has(lastw.dir);
+  if(now < 11 && onsh){
+    if(spd >= 6){
+      // strong onshore/SSW = mixing/advection, NOT a cap. Cancel a cap point and flag advection.
+      cap--; E.advect=true;
+      E.reasons.push(`strong onshore flow ${fmt1(spd)} m/s — warm advection/mixing, not a sea-breeze cap`);
+    } else if(spd >= 2){
+      cap++; E.reasons.push(`light onshore flow ${fmt1(spd)} m/s — gentle sea breeze, capping`);
+    }
+  }
+  // ===== MIXING-BREAK DETECTOR =====
+  // A capped-flat morning that suddenly ramps (>=1.5°C in ~30 min) with rising wind is a
+  // regime change: the cap broke. Un-discount HARD — the warm models are back in play.
+  {
+    const o = S.obs || [];
+    if(o.length >= 4){
+      const tNow = o[o.length-1];
+      // temp ~30 min ago
+      let prev=null; for(let i=o.length-2;i>=0;i--){ if(tNow.t - o[i].t >= 0.45){ prev=o[i]; break; } }
+      if(prev){
+        const dT = tNow.v - prev.v;
+        // wind trend: is speed rising?
+        let wRise=false;
+        if(w.length>=3){ const wn=w[w.length-1].spd??0, wp=w[Math.max(0,w.length-4)].spd??0; wRise = (wn - wp) >= 1.5; }
+        if(dT >= 1.5 && (wRise || spd >= 6)){
+          E.mixBreak = true;
+          E.reasons.push(`⚡ MIXING BREAK: +${fmt1(dT)}° in 30 min with ${wRise?"rising":"strong"} wind — morning cap broke, fast warm-up underway`);
+        }
+      }
     }
   }
   E.capScore = cap;
-  if(cap >= 2) E.trustWarm = 0.35;
+  // resolve trust: a mixing break or strong advection overrides the cap and BOOSTS the warm models
+  if(E.mixBreak){ E.trustWarm = 1.25; }      // trust warm models MORE than baseline
+  else if(E.advect && cap <= 0){ E.trustWarm = 1.1; }
+  else if(cap >= 2) E.trustWarm = 0.35;
   else if(cap === 1) E.trustWarm = 0.65;
+  else E.trustWarm = 1;
   return E;
 }
 
@@ -987,7 +1089,12 @@ function computeNowcast(){
       if(v==null) return null;
       if(h < now-1) return v;
       const w = Math.exp(-Math.max(0,h-now)/BIAS_DECAY_H);
-      return v + bias*w*(bias>0 ? evid.trustWarm : 1);
+      // normal: scale only the warm (positive) correction by trust.
+      // mixing break: the surface is jumping faster than pace can track, so amplify the
+      // correction in BOTH directions to let obs pull the projection up quickly.
+      const tw = evid.trustWarm;
+      const scale = evid.mixBreak ? Math.max(1, tw) : (bias>0 ? tw : 1);
+      return v + bias*w*scale;
     });
     let rem = -1e9, remT = null;
     for(let h=Math.floor(now); h<24; h++){
@@ -1243,7 +1350,11 @@ function render(nc){
         vNote.textContent = `dead heat — ${best.k}° ${(best.p*100).toFixed(0)}% vs ${second.k}° ${(second.p*100).toFixed(0)}% · distribution centre ${fmt1(bk.center)}° sits on the bucket boundary · don’t pay up for either side; the tiebreakers follow`;
       }
     } else if(vEl){ vEl.textContent="—"; vNote.textContent="needs model data"; if(vLabel) vLabel.textContent="Most likely settlement"; }
-    if(nc.evid && nc.evid.trustWarm < 1 && vEl && bk && bk.buckets.length){
+    if(nc.evid && nc.evid.mixBreak && vEl){
+      vNote.textContent += ` · ⚡ MIXING BREAK — ${nc.evid.reasons.filter(r=>r.includes("MIXING")||r.includes("advection")).join("; ")}. Morning cap broke; warm models BOOSTED, expect a fast climb — lean HIGH, not low`;
+    } else if(nc.evid && nc.evid.advect && nc.evid.trustWarm>1 && vEl){
+      vNote.textContent += ` · strong onshore/SSW flow is HEATING not capping (warm advection) — warm models trusted, upside live`;
+    } else if(nc.evid && nc.evid.trustWarm < 1 && vEl && bk && bk.buckets.length){
       vNote.textContent += ` · ⚠ warm pace discounted to ${Math.round(nc.evid.trustWarm*100)}% — ${nc.evid.reasons.join("; ")} (cloud-trapped night heat rarely carries to the peak)`;
     }
     if(bk && bk.analogUsed!=null && vEl){
@@ -1696,6 +1807,7 @@ async function refresh(){
   const [a, m, o, tf] = await Promise.allSettled([fetchAmedas(), fetchMetar(), fetchModels(), fetchTaf()]);
   await Promise.allSettled([fetchSounding()]);
   await Promise.allSettled([fetchNeighbors(), fetchYdayObs(), fetchJmaForecast(), maybeFetchArchive()]);
+  cloudSync();
   setChip("chip-amedas", a.status==="fulfilled");
   setChip("chip-metar", m.status==="fulfilled");
   setChip("chip-models", o.status==="fulfilled");

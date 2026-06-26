@@ -49,7 +49,7 @@
     <div class="panel-head"><h2>2 · Settlement, buckets &amp; the print level</h2></div>
     <div class="prose">
       <p>Polymarket resolves on <b>Wunderground's RJTT history page in whole °C</b>, which is built from the discrete METAR prints — so settlement follows the prints, not the continuous thermometer. The <b>settlement floor</b> is the highest METAR print so far (estimated from AMeDAS when the METAR feed is blocked, marked with ~).</p>
-      <p><b>Buckets</b><b></b> <i></i> (peak ahead) → <i>likely final</i><i>settlement (unofficial)</i></p>
+      <p><b>Buckets</b> are P(day's METAR max = k°C): a normal distribution centred on the bias-corrected blend, spread from model disagreement plus time-to-peak uncertainty, with all mass below the already-printed floor collapsed into the floor bucket. The analog-day median (section 5) gets a visible 25% vote in the centre. Heuristic, not a calibrated model — a structured prior, not an edge by itself. When the top two buckets are within 8 points, the verdict declares a <b>toss-up</b> instead of picking a side. The verdict graduates: <i>most likely</i> (peak ahead) → <i>likely final</i> (peak just passed, or the max sits near a rounding edge) → <i>settlement (unofficial)</i> once the day is decided.</p>
       <p><b>Print forecast:</b> the panel projects the AMeDAS trend onto the next :00/:30 report times (each print's expected whole degree with probability), calibrates today's METAR-minus-AMeDAS sensor offset from actual prints, and estimates the day's <b>printed max</b> under both half-hourly and hourly-only sampling. When the curve touches a degree between prints that the sampled prints may never catch, a print-risk warning says so — that gap is exactly how a 25.7° day settles at 25.</p>
     </div>
   </section>
@@ -58,7 +58,7 @@
     <div class="panel-head"><h2>3 · The final call</h2></div>
     <div class="prose">
       <p>When the verdict, FOLLOW model and headline disagree on the bucket, an arbiter runs the evidence chain in order — 850 hPa foehn vs maritime flow, the dew-point trend, whether the warm pace was already discounted, the T850 ceiling veto, sea-breeze status, and observed sunshine — tallies hot vs cool votes, picks a side (or admits a split and defaults to the verdict), and finally applies the <b>print gate</b>: a bucket the sampled METAR prints can't reach is demoted to the printable one. The ◂ on the bucket bars marks the FOLLOW model's implied bucket.</p>
-      <p><b>Morning evidence check (05:30–14:00 JST):</b> when the ensemble has been lifted by warm overnight pace, the dashboard tests whether that warmth was real. A broken/overcast deck on the METAR, low observed sunshine, heavy forecast cloud, or flow already onshore are capping evidence that the night heat was cloud-trapped, and the warm pace is discounted (to 65% with one signal, 35% with two or more) with the reasons printed on the verdict line. Cold pace is never discounted, and the check self-updates — if the deck breaks, trust returns.</p>
+      <p><b>Morning evidence check (05:30–14:00 JST):</b> when the ensemble has been lifted by warm overnight pace, the dashboard tests whether that warmth was real. A broken/overcast deck on the METAR, low observed sunshine, heavy forecast cloud, or <i>gentle</i> onshore flow are capping evidence that the night heat was cloud-trapped, and the warm pace is discounted (65% one signal, 35% two or more). <b>Wind-speed discriminator:</b> a light onshore/SSW wind (&lt;4 m/s) is a sea breeze and caps, but a <i>strong</i> onshore/SSW wind (≥6 m/s) is warm advection plus downward mixing — it HEATS, so the warm models are trusted, not discounted. <b>Mixing-break detector:</b> if a flat, capped morning suddenly ramps ≥1.5°C in 30 min with rising wind, the cap has broken — a regime change pace can’t see coming; the warm models are boosted and the verdict flips to lean high. Cold pace is never discounted, and the check self-updates.</p>
     </div>
   </section>
 
@@ -85,6 +85,22 @@
     <div class="prose">
       <p><b>Sources:</b> JMA AMeDAS (10-min obs: temp, wind, humidity, sunshine, pressure, rain — stations 44166 Haneda, 44132 Tokyo, 46106 Yokohama), aviationweather.gov (RJTT METAR/TAF), Open-Meteo forecast + archive APIs (7 models, cloud, precip, 850 hPa temperature &amp; wind, 2-yr reanalysis), JMA public forecast (130000), with links out to Wunderground (resolution source), Tokyo Amesh radar, Himawari satellite, and Tropical Tidbits East Asia charts. Everything refreshes every 5 minutes, all times JST.</p>
       <p><b>Caveats, honestly:</b> thresholds and weights throughout (the 6-h pace decay, the 60/40 skill score, the discount levels, the arbiter's votes, the +9–12° T850 rule) are reasoned heuristics, not fitted parameters — the track record is the instrument for judging them. The METAR feed occasionally blocks in browsers; the dashboard degrades gracefully and estimates the floor from AMeDAS, but confirm settlement on Wunderground. Settlement markets carry real risk; this is an information tool, not financial advice — size like the variance is real, because it is.</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>7 · Permanent journal (cloud auto-save)</h2></div>
+    <div class="prose">
+      <p>By default the track-record journal lives in your browser only, so clearing site data resets it. To make it <b>permanent and automatic across all your devices</b>, connect a free Supabase database — then every verdict saves itself to the cloud and reloads on any device, with no buttons to press.</p>
+      <p><b>One-time setup (~10 min):</b></p>
+      <p>1. Go to <b>supabase.com</b> → sign up free → <b>New project</b> (pick any name and a database password; wait ~2 min for it to spin up).</p>
+      <p>2. In the project, open the <b>SQL Editor</b> (left sidebar) → <b>New query</b> → paste this and click <b>Run</b>:</p>
+      <p style="font-family:var(--mono);font-size:12px;background:rgba(0,0,0,.25);padding:12px 14px;border-radius:8px;white-space:pre-wrap;line-height:1.6">create table rjtt_journal (id text primary key, data jsonb, updated timestamptz);
+alter table rjtt_journal enable row level security;
+create policy "anon all" on rjtt_journal for all using (true) with check (true);</p>
+      <p>3. Open <b>Settings → API</b>. Copy two things: the <b>Project URL</b> and the <b>anon public</b> key.</p>
+      <p>4. In <b>app.js</b>, near the top of the journal section, find <code>const JR_CLOUD</code> and paste your URL and key into the <code>url</code> and <code>key</code> fields. Save, upload <code>app.js</code>, commit.</p>
+      <p>That’s it — the dashboard now auto-saves every verdict to your database and pulls it back on load. The Track-record note will show “☁ cloud-synced.” Your history survives cache wipes, new devices, and username changes. The anon key is safe to put in client code (it only allows what the row-security policy above permits — reading and writing this one journal table).</p>
     </div>
   </section>
 
