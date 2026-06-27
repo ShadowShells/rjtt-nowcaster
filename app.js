@@ -1324,25 +1324,50 @@ function render(nc){
       const best = sorted[0], second = sorted[1];
       const tossup = !!(second && (best.p - second.p) < 0.08 && Math.abs(best.k - second.k) === 1 && !nc.peakSet);
       bk.__top = best; bk.__second = second; bk.__tossup = tossup;
-      vEl.textContent = `${best.k}°C`;
-      const conf = Math.round(best.p*100);
       const now2 = jstParts().dec;
-      // how close is the day's max to a rounding edge (x.5)?
-      const fracDist = (S.obsMax!=null) ? Math.abs(0.5 - Math.abs(S.obsMax - Math.floor(S.obsMax))) : null;
-      const nearEdge = fracDist!=null && fracDist < 0.2;
-      if(nc.peakSet && now2 >= 15 && !nearEdge){
+      // is the temperature still falling / is it late enough that no climb is possible?
+      const o = S.obs || [];
+      let falling = false, sinceHigh = null;
+      if(S.obsMax!=null && S.obsMaxT!=null){
+        sinceHigh = now2 - S.obsMaxT;               // hours since the high was set
+        const cur = (o.length? o[o.length-1].v : S.cur);
+        falling = (cur!=null && S.cur!=null && (S.obsMax - S.cur) >= 0.3);  // cooled >=0.3 off the high
+      }
+      // a day is DECIDED when the peak is set AND (temp has fallen well off it, OR it's evening 18:00+)
+      const decided = nc.peakSet && (sinceHigh!=null && sinceHigh >= 1.5 && (falling || now2 >= 18));
+      // rounding-edge risk only matters if the max could still CLIMB into the next bucket.
+      // 23.3 rounds to 23; bucket 24 needs >=23.5, i.e. the temp must RISE. If decided/falling, it can't.
+      const frac = (S.obsMax!=null) ? (S.obsMax - Math.floor(S.obsMax)) : null;   // .3 for 23.3
+      const couldClimb = !decided && !falling && now2 < 15.5;                      // any realistic upside left?
+      const nearEdgeLive = frac!=null && frac >= 0.35 && frac < 0.5 && couldClimb; // e.g. 23.7 with climb still possible
+
+      if(decided){
+        // day is over: settlement is simply the rounded observed high. No bucket arbitration.
+        const settledK = Math.round(S.obsMax);
+        vEl.textContent = `${settledK}°C`;
         if(vLabel) vLabel.textContent = "Settlement (unofficial)";
-        vNote.textContent = `day's high is in — ${fmt1(S.obsMax)}° at ${hhmm(S.obsMaxT)} JST; ${conf}% · confirm the official print on Wunderground`;
-      } else if(nc.peakSet){
+        vNote.textContent = `day's high is in — ${fmt1(S.obsMax)}° at ${hhmm(S.obsMaxT)} JST, temp now falling → settles ${settledK}° · confirm the official print on Wunderground`;
+        bk.__settledK = settledK;
+      } else if(nc.peakSet && nearEdgeLive){
+        vEl.textContent = `${best.k}°C`;
         if(vLabel) vLabel.textContent = "Likely final";
-        vNote.textContent = (nearEdge
-          ? `peak passed, but ${fmt1(S.obsMax)}° sits near the rounding edge — the adjacent bucket is live; watch the METAR prints · ${conf}%`
-          : `peak has passed; ${conf}% in this bucket · a late warm push can still surprise before ~15:00`);
+        const conf = Math.round(best.p*100);
+        vNote.textContent = `${fmt1(S.obsMax)}° sits just below the rounding edge and a late nudge could still tip it up — adjacent bucket live; watch the prints · ${conf}%`;
+      } else if(nc.peakSet){
+        // peak set, not near a climbable edge: round the observed high
+        const settledK = Math.round(S.obsMax);
+        vEl.textContent = `${settledK}°C`;
+        if(vLabel) vLabel.textContent = "Likely final";
+        vNote.textContent = `peak has passed at ${fmt1(S.obsMax)}° (${hhmm(S.obsMaxT)} JST) → ${settledK}°; a late warm push before ~15:00 is the only upside`;
+        bk.__settledK = settledK;
       } else {
+        vEl.textContent = `${best.k}°C`;
+        const conf = Math.round(best.p*100);
         if(vLabel) vLabel.textContent = "Most likely settlement";
         const hrs = Math.max(0,(nc.peakT??14) - now2);
         vNote.textContent = `${conf}% in this bucket · ~${hrs.toFixed(1)} h to expected peak — still in play`;
       }
+      const conf = Math.round(best.p*100);
       if(tossup){
         const lo2 = Math.min(best.k, second.k), hi2 = Math.max(best.k, second.k);
         if(vLabel) vLabel.textContent = "Toss-up";
@@ -1390,7 +1415,12 @@ function render(nc){
 
     // FINAL CALL: arbitrate verdict vs FOLLOW vs headline through the evidence chain
     const fcEl = document.getElementById("fc-val"), fcNote = document.getElementById("fc-note");
-    if(fcEl && bk && bk.buckets.length){
+    if(fcEl && bk && bk.__settledK!=null){
+      // day is decided — final call is the settled high, no arbitration
+      fcEl.textContent = `${bk.__settledK}°C`;
+      fcEl.style.color = "var(--ink)";
+      fcNote.textContent = `day's high is in at ${fmt1(S.obsMax)}° → settles ${bk.__settledK}°; nothing left to arbitrate · confirm on Wunderground`;
+    } else if(fcEl && bk && bk.buckets.length){
       const top = bk.__top || bk.buckets.reduce((a,b)=> b.p>a.p ? b : a);
       const second = bk.__second, tossup = bk.__tossup;
       const headB = nc.high!=null ? Math.round(nc.high) : null;
