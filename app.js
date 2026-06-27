@@ -1402,8 +1402,22 @@ function render(nc){
       }
     }
     if(bk && bk.buckets.length){
-      const maxP = Math.max(...bk.buckets.map(b=>b.p));
-      bWrap.innerHTML = bk.buckets.map(b =>
+      // If the day is DECIDED, collapse the distribution onto the settled high so the bars
+      // match the verdict. Leave a small sliver on a neighbor only for unseen-print risk.
+      let barBuckets = bk.buckets;
+      if(bk.__settledK!=null && S.obsMax!=null){
+        const sk = bk.__settledK;
+        const frac = S.obsMax - Math.floor(S.obsMax);     // .3 for 23.3
+        // residual chance an unseen METAR print already caught the next degree up
+        // (only meaningful if the high is within ~0.3 of the upper edge)
+        const upRisk = frac >= 0.2 ? Math.min(0.12, (frac-0.2)*0.6) : 0.02;
+        barBuckets = [
+          {k: sk, p: 1 - upRisk},
+          {k: sk+1, p: upRisk}
+        ];
+      }
+      const maxP = Math.max(...barBuckets.map(b=>b.p));
+      bWrap.innerHTML = barBuckets.map(b =>
         `<div class="bucket${b.p===maxP?" top":""}">
            <span class="bk">${b.k}°C${followBk===b.k?" ◂":""}</span>
            <div class="bbar"><div style="width:${(b.p*100).toFixed(1)}%"></div></div>
