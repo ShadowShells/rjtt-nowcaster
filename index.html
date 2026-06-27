@@ -103,12 +103,12 @@
     </div>
     <div class="settle">
       <div class="settle-side">
-        <div class="label">Final call · evidence-arbitrated</div>
-        <div class="big" id="fc-val">—</div>
+        <div class="label" id="st-verdict-label">Settlement call</div>
+        <div class="big accent" id="fc-val">—</div>
         <div class="sub" id="fc-note">—</div>
-        <div class="label" style="margin-top:16px" id="st-verdict-label">Most likely settlement</div>
-        <div class="big accent" id="st-verdict">—</div>
-        <div class="sub" id="st-verdict-note">—</div>
+        <!-- hidden: merged into the single call above; JS still writes these -->
+        <div id="st-verdict" style="display:none">—</div>
+        <div id="st-verdict-note" style="display:none">—</div>
         <div class="label" style="margin-top:16px">Settlement floor (METAR max)</div>
         <div class="big" id="st-floor">—</div>
         <div class="sub" id="st-floor-note">—</div>
@@ -120,7 +120,7 @@
       </div>
       <div class="settle-buckets" id="st-buckets"><div class="sub">computing…</div></div>
     </div>
-    <p class="sub settle-foot"
+    <p class="sub settle-foot">Buckets, the final-call arbiter, the print gate, morning-evidence discount, analog days and the track record are all explained on the <a href="about.html" style="color:var(--jma);font-weight:600">How it works</a> page.</p>
   </section>
 
   <section class="panel">
@@ -314,7 +314,8 @@
   </section>
 
   <p class="note" id="method">
-    <a href="about.html" style="color:var(--jma);font-weight:600">↗</a>
+    Live nowcast of the Tokyo Haneda (RJTT) daily maximum: JMA AMeDAS 10-minute observations, RJTT METAR/TAF, and seven bias-corrected models, with sea-breeze, airmass, analog-day and print-level settlement logic.
+    <a href="about.html" style="color:var(--jma);font-weight:600">How it works — full methodology & data sources ↗</a>
   </p>
 </div>
 <script src="app.js"></script>

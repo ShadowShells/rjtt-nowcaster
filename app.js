@@ -692,14 +692,20 @@ function metarPrintOffset(){
 }
 function printForecast(nc){
   const now = jstParts().dec;
-  const pts = (S.obs||[]).filter(p => p.t > now - 0.7);
-  if(pts.length < 3 || S.cur==null) return null;
-  // least-squares trend over the last ~40 min (°C per hour)
+  const allObs = S.obs || [];
+  // Use the last ~60 min of observations; if that's thin, fall back to the last 4 points.
+  let pts = allObs.filter(p => p.t > now - 1.0);
+  if(pts.length < 2 && allObs.length >= 2) pts = allObs.slice(-4);
+  // need at least 2 points and a current temp to project anything
+  if(pts.length < 2 || S.cur==null) return null;
+  // least-squares trend over the recent window (°C per hour)
   const n = pts.length;
   const mx = pts.reduce((a,p)=>a+p.t,0)/n, my = pts.reduce((a,p)=>a+p.v,0)/n;
   let num=0, den=0;
   for(const p of pts){ num += (p.t-mx)*(p.v-my); den += (p.t-mx)**2; }
-  const slope = den>0 ? num/den : 0;
+  let slope = den>0 ? num/den : 0;
+  // guard against a wild slope from a single noisy jump
+  if(!isFinite(slope) || Math.abs(slope) > 12) slope = 0;
   const {off, n:offN} = metarPrintOffset();
   // next three report times (:00 / :30)
   const rows = [];
@@ -1441,8 +1447,8 @@ function render(nc){
       const cands = new Set([top && top.k, (tossup && second) ? second.k : null, followBk, headB].filter(v=>v!=null));
       if(cands.size <= 1){
         fcEl.textContent = `${top.k}°C`;
-        fcEl.style.color = "var(--ink)";
-        fcNote.textContent = "verdict, FOLLOW model and headline all aligned — trade the number";
+        fcEl.style.color = "var(--accent)";
+        fcNote.textContent = `${Math.round(top.p*100)}% — verdict, FOLLOW model and headline all agree; trade the number`;
       } else {
         const hot = Math.max(...cands), cool = Math.min(...cands);
         let hotV=0, coolV=0; const why=[];
@@ -1475,12 +1481,28 @@ function render(nc){
         }
         fcEl.textContent = `${pick}°C`;
         fcEl.style.color = (conf==="split") ? "var(--ink)" : "var(--accent)";
+        // probability context from the bucket distribution (folds in the old toss-up box)
+        let probCtx = "";
+        if(bk.__tossup && bk.__second){
+          const a=bk.__top, b=bk.__second;
+          probCtx = ` · resolved from a near-tie (${a.k}° ${Math.round(a.p*100)}% vs ${b.k}° ${Math.round(b.p*100)}%)`;
+        } else {
+          probCtx = ` · ${Math.round(top.p*100)}% in the ${top.k}° bucket`;
+        }
         fcNote.textContent =
-          (conf==="split" ? "evidence split — defaulting to the verdict bucket"
-           : conf==="print-gated" ? "evidence picked the hot side, then the print gate demoted it"
-           : conf==="clear" ? "evidence chain is clear" : "evidence leans")
-          + ` (hot ${hotV} v cool ${coolV}): ${why.join("; ") || "no strong signals"} · disputed ${cool}° vs ${hot}°${printNote}`;
+          (conf==="split" ? "evidence is split, holding the model verdict"
+           : conf==="print-gated" ? "evidence leaned high, but the print gate demoted it"
+           : conf==="clear" ? "evidence is clear" : "evidence leans")
+          + ` (${hotV} hot v ${coolV} cool: ${why.join("; ") || "no strong signals"})`
+          + probCtx + printNote;
       }
+    }
+    // merged-box label reflects the day stage
+    const vl=document.getElementById("st-verdict-label");
+    if(vl){
+      if(bk && bk.__settledK!=null) vl.textContent = "Settlement (day is in)";
+      else if(nc.peakSet) vl.textContent = "Settlement call · likely final";
+      else vl.textContent = "Settlement call";
     }
   }
 
