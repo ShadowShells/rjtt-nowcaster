@@ -1024,13 +1024,9 @@ function computeBuckets(nc){
   const now = jstParts().dec;
   // spread: model disagreement + remaining time-to-peak uncertainty, floored
   const highs = Object.values(nc.perModel).map(p=>p.projHigh);
-  let mean = nc.high;
+  const mean = nc.high;   // already includes the analog vote (folded in at computeNowcast)
   const varM = highs.length>1 ? highs.reduce((a,v)=>a+(v-mean)**2,0)/(highs.length-1) : 0.25;
-  let analogUsed = null;
-  if(S.analog && S.analog.n>=8 && S.analog.high!=null && isFinite(S.analog.high)){
-    mean = 0.75*mean + 0.25*S.analog.high;     // history gets a 25% vote
-    analogUsed = S.analog.high;
-  }
+  const analogUsed = nc.analogUsed ?? null;
   const hoursToPeak = Math.max(0, (nc.peakT!=null ? nc.peakT : 14) - now);
   let sigma = Math.max(0.35, Math.sqrt(varM + (0.25*hoursToPeak/3)**2));
   if(nc.peakSet){
@@ -1131,6 +1127,14 @@ function computeNowcast(){
   let wsum=0, hsum=0;
   for(const [k,pm] of Object.entries(out.perModel)){ const w=wOf(k); wsum+=w; hsum+=w*pm.projHigh; }
   out.high = hsum/wsum;
+  // analog-day vote folded into the headline high so the displayed number and the
+  // settlement buckets use the SAME value (no silent divergence between them).
+  if(S.analog && S.analog.n>=8 && S.analog.high!=null && isFinite(S.analog.high)){
+    out.high = 0.75*out.high + 0.25*S.analog.high;
+    out.analogUsed = S.analog.high;
+  }
+  // the projected high can never be below what's already been observed
+  if(S.obsMax!=null && out.high < S.obsMax) out.high = S.obsMax;
   const highs = Object.values(out.perModel).map(p=>p.projHigh);
   out.lo = Math.min(...highs); out.hi = Math.max(...highs);
   // peak timing
@@ -1388,7 +1392,7 @@ function render(nc){
     } else if(nc.evid && nc.evid.trustWarm < 1 && vEl && bk && bk.buckets.length){
       vNote.textContent += ` · ⚠ warm pace discounted to ${Math.round(nc.evid.trustWarm*100)}% — ${nc.evid.reasons.join("; ")} (cloud-trapped night heat rarely carries to the peak)`;
     }
-    if(bk && bk.analogUsed!=null && vEl){
+    if(bk && bk.analogUsed!=null && S.analog && S.analog.n && vEl){
       vNote.textContent += ` · ${S.analog.n} analog days lean ${fmt1(bk.analogUsed)}° (25% weight in the verdict)`;
     }
     // coherence check: does the verdict agree with the FOLLOW model?
