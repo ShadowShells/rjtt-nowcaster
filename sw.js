@@ -3,7 +3,7 @@
    - App shell: network-first with cache-busting, so new deploys always win.
    - Live weather APIs: never cached, always fetched fresh.
    - On a new version, the worker activates immediately and tells open pages to reload. */
-const SHELL = "rjtt-shell-v27";
+const SHELL = "rjtt-shell-v28";
 const SHELL_FILES = [
   "./", "./index.html", "./styles.css", "./app.js",
   "./about.html", "./map.html", "./favicon.svg", "./manifest.webmanifest"

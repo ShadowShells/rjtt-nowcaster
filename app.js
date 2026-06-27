@@ -1474,9 +1474,29 @@ function render(nc){
             else if(fr<=0.4){ coolV+=1; why.push("mostly cloud"); }
           }
         }
-        let pick = hotV>coolV ? hot : cool;
-        let conf = Math.abs(hotV-coolV)>=2 ? "clear" : "lean";
-        if(hotV===coolV){ pick = top.k; conf = "split"; }
+        // The arbiter ADJUSTS FROM the bucket winner; it does not override it wholesale.
+        // Evidence can only move the call off the top bucket when the race is close
+        // (top bucket < 55%) AND the disputed neighbor is adjacent. A strong evidence
+        // sweep (|diff|>=2) can move it even on a clearer bucket, but only by one degree.
+        const margin = second ? (top.p - second.p) : 1;     // how decisive is the top bucket
+        const evDiff = hotV - coolV;
+        let pick = top.k;                                    // default: trust the distribution
+        let conf = "holds";
+        if(Math.abs(evDiff) >= 2){
+          // strong evidence sweep: allow a one-degree move toward the evidence direction,
+          // but never past the disputed neighbor and never more than 1° off the top bucket
+          const dir = evDiff>0 ? 1 : -1;
+          const target = top.k + dir;
+          if(second && Math.abs(target - second.k) <= 0 || margin < 0.30){
+            pick = target; conf = "clear";
+          } else { pick = top.k; conf = (evDiff>0?"hot-lean held":"cool-lean held"); }
+        } else if(Math.abs(evDiff) === 1 && margin < 0.18 && second){
+          // weak evidence only breaks a genuine near-tie, toward the evidence side
+          pick = evDiff>0 ? Math.max(top.k,second.k) : Math.min(top.k,second.k);
+          conf = "lean";
+        } else {
+          pick = top.k; conf = "holds";
+        }
         let printNote = "";
         if(pf && pick===hot && pf.pHalf!=null && pf.pHour!=null && pf.pHalf < hot && pf.pHour < hot){
           const pm = Math.max(pf.pHalf, pf.pHour);
@@ -1493,10 +1513,14 @@ function render(nc){
         } else {
           probCtx = ` · ${Math.round(top.p*100)}% in the ${top.k}° bucket`;
         }
-        fcNote.textContent =
-          (conf==="split" ? "evidence is split, holding the model verdict"
-           : conf==="print-gated" ? "evidence leaned high, but the print gate demoted it"
-           : conf==="clear" ? "evidence is clear" : "evidence leans")
+        const confPhrase =
+          conf==="print-gated" ? "evidence leaned high, but the print gate demoted it"
+          : conf==="clear" ? "strong evidence moved the call"
+          : conf==="lean" ? "evidence broke a near-tie"
+          : conf==="holds" ? "evidence noted, but the bucket distribution holds the call"
+          : conf.endsWith("held") ? `${conf} — not enough to move off the lead bucket`
+          : "evidence leans";
+        fcNote.textContent = confPhrase
           + ` (${hotV} hot v ${coolV} cool: ${why.join("; ") || "no strong signals"})`
           + probCtx + printNote;
       }
