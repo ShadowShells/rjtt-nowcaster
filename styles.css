@@ -238,3 +238,11 @@ body{background-image:none !important}
   .hero-right{align-items:flex-start; text-align:left}
   .hero-stats{gap:20px}
 }
+
+
+/* ===== FIX: let the live weather background show through ===== */
+/* the body + html had an opaque paper fill painting over the #sky/#wx canvas (z-index -2/-3).
+   Make them transparent so the animated sky is visible behind the glass panels. */
+html{ background:transparent !important; }
+body{ background:transparent !important; background-image:none !important; }
+/* #sky provides the base color now (it sits at z-index -3 and is always painted) */
