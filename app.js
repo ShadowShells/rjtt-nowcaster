@@ -1200,6 +1200,7 @@ function render(nc){
   if(thM) thM.textContent = `Model @ ${hhmm(Math.min(t.dec,23.99))}`;
 
   updateHero(nc);
+  if(window.__wxClassify) try{ window.__wxClassify(); }catch(e){}
 
   // readouts
   const elN = document.getElementById("r-nowcast");
@@ -2020,12 +2021,25 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
   }
 
   function classify(){
-    // raining?  -> S.rains last value or fxRain; cloud -> S.cloud near now; sun -> S.suns
+    // DEMO override: if a scene is forced, render it and skip live detection
+    if(window.__wxForce){
+      mode = window.__wxForce;
+      intensity = (mode==="storm")?0.9:(mode==="rain")?0.6:0.5;
+      if(mode==="rain"||mode==="storm") makeRain(Math.round(160+intensity*420));
+      if(mode==="cloud"||mode==="clear") makeClouds(mode==="cloud"?9:4);
+      setSky();
+      const b=document.getElementById("wx-badge");
+      if(b) b.textContent = ({clear:"\u2600 clear",cloud:"\u2601 cloudy",rain:"\u2602 rain",storm:"\u26c8 heavy rain"})[mode] + " (demo)";
+      return;
+    }
     try{
       const SS = (typeof S!=="undefined" && S) ? S : (window.S||null);
       if(!SS) { mode="clear"; }
       const rains=(SS&&SS.rains)||[];
       const lastR = rains.length?rains[rains.length-1].v:0;
+      // recent accumulation: total rain over the last ~hour (catches "it rained, now between showers")
+      let recentR = 0;
+      if(rains.length){ const tEnd=rains[rains.length-1].t; recentR = rains.filter(r=>r.t>tEnd-1).reduce((a,b)=>a+b.v,0); }
       const fxR = (SS&&SS.fxRain)||0;
       let cloudNow=null;
       if(SS&&SS.cloud){ const h=Math.floor(((Date.now()+9*3600*1000)/3600000)%24); const c=SS.cloud[h]; if(c!=null) cloudNow=c; }
@@ -2033,7 +2047,12 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
       const suns=(SS&&SS.suns)||[];
       if(suns.length){ const last=suns[suns.length-1]; const rec=suns.filter(x=>x.t>last.t-1); if(rec.length) sunFrac=rec.reduce((a,b)=>a+b.v,0)/(rec.length*10); }
 
-      if(lastR>0.5 || fxR>=2){ mode = (lastR>2||fxR>=6)?"storm":"rain"; intensity=Math.min(1,Math.max(0.4,(lastR||fxR)/6)); }
+      // RAIN if: falling now, OR fell recently (last hour), OR forecast to rain soon.
+      const rainSignal = Math.max(lastR, recentR*0.6, fxR);
+      if(lastR>0.3 || recentR>=0.5 || fxR>=1.5){
+        mode = (lastR>2 || fxR>=6 || recentR>=4) ? "storm" : "rain";
+        intensity = Math.min(1, Math.max(0.4, rainSignal/6));
+      }
       else if((cloudNow!=null && cloudNow>=60) || (sunFrac!=null && sunFrac<0.35)){ mode="cloud"; intensity=cloudNow!=null?cloudNow/100:0.7; }
       else { mode="clear"; intensity=0.4; }
 
@@ -2088,7 +2107,18 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
   }
   classify();
   requestAnimationFrame(frame);
-  // reclassify whenever data refreshes (piggyback the 5-min cycle + a 60s poll)
   setInterval(classify, 60*1000);
   window.addEventListener("focus", classify);
+  // expose so render() can refresh the sky the instant new data lands
+  window.__wxClassify = classify;
+  // sky demo buttons: force a scene (or return to live)
+  document.querySelectorAll(".skydemo").forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      const sky = btn.getAttribute("data-sky");
+      document.querySelectorAll(".skydemo").forEach(b=>b.classList.remove("on"));
+      if(sky==="live"){ window.__wxForce = null; }
+      else { window.__wxForce = sky; btn.classList.add("on"); }
+      classify();
+    });
+  });
 })();

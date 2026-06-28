@@ -263,3 +263,10 @@ body{ background:transparent !important; background-image:none !important; }
 :root:not([data-theme="dark"]) .hero-headline,
 :root:not([data-theme="dark"]) .hn-val,
 :root:not([data-theme="dark"]) .hs-v{ color:var(--ink) !important; text-shadow:none; }
+
+
+/* sky demo buttons */
+.skydemo{font-size:13px; padding:2px 7px; border-radius:7px; cursor:pointer;
+  background:var(--panel); border:1px solid var(--ink-soft); color:var(--ink); line-height:1.4}
+.skydemo:hover{background:var(--accent); color:#fff; border-color:var(--accent)}
+.skydemo.on{background:var(--accent); color:#fff; border-color:var(--accent)}

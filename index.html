@@ -59,6 +59,15 @@
       <div class="row"><span>DATE (JST)</span><b id="m-date">—</b></div>
       <div class="row"><span>UPDATED</span><b id="m-updated">—</b></div>
       <div class="row"><span>SKY</span><b id="wx-badge">—</b></div>
+      <div class="row" style="margin-top:6px"><span>SKY DEMO</span>
+        <span style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
+          <button class="skydemo" data-sky="clear" title="force clear">☀</button>
+          <button class="skydemo" data-sky="cloud" title="force cloudy">☁</button>
+          <button class="skydemo" data-sky="rain" title="force rain">☂</button>
+          <button class="skydemo" data-sky="storm" title="force storm">⛈</button>
+          <button class="skydemo" data-sky="live" title="back to live">↻</button>
+        </span>
+      </div>
       <div class="row"><span>MAP</span><a href="map.html" style="color:var(--jma);font-weight:600;text-decoration:underline">Tokyo Bay live map ↗</a></div>
       <button class="refresh" id="btn-refresh">Refresh data</button>
       <button class="theme" id="btn-theme" aria-label="Toggle dark mode">◐ Theme</button>
