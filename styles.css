@@ -177,16 +177,20 @@ td.proj{font-weight:600}
 
 /* ============ live weather background + glass ============ */
 #sky{position:fixed; inset:0; z-index:-3; transition:background 1.5s ease;
-  background:linear-gradient(160deg,#1b2330 0%,#222c3a 45%,#2b2417 100%);}
+  /* DEFAULT = light theme: soft cool daylight sky */
+  background:linear-gradient(160deg,#dfe6ee 0%,#eef2f0 45%,#f3ece2 100%);}
 [data-theme="dark"] #sky{background:linear-gradient(160deg,#0d1016 0%,#141a24 50%,#1a1206 100%);}
 #wx{position:fixed; inset:0; z-index:-2; pointer-events:none}
 /* a soft vignette so panels read against any sky */
 body::before{content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+  /* light mode: barely-there light vignette */
+  background:radial-gradient(120% 90% at 50% 0%, rgba(255,255,255,0) 50%, rgba(255,255,255,.25) 100%);}
+[data-theme="dark"] body::before{
   background:radial-gradient(120% 90% at 50% 0%, rgba(0,0,0,0) 40%, rgba(8,10,14,.45) 100%);}
 
 /* turn the chart-stamp panels into frosted glass */
 .panel, .masthead, .readouts, .settle, .banner{
-  background:rgba(27,31,38,.62) !important;
+  background:rgba(247,249,246,.70) !important;
   backdrop-filter:blur(14px) saturate(1.1); -webkit-backdrop-filter:blur(14px) saturate(1.1);
   border:1px solid rgba(255,255,255,.10) !important;
   border-radius:16px; box-shadow:0 8px 30px rgba(0,0,0,.35);
@@ -201,7 +205,7 @@ body::before{content:""; position:fixed; inset:0; z-index:-1; pointer-events:non
 .masthead .id{border-right-color:rgba(255,255,255,.10) !important}
 .sheet{max-width:1080px}
 /* keep numbers crisp: text stays full-strength */
-body{color:#EAEFF5}
+[data-theme="dark"] body{color:#EAEFF5}
 .big, .mid, h1, h2{text-shadow:0 1px 12px rgba(0,0,0,.35)}
 /* the grid background of the body is distracting over a sky — hide it */
 body{background-image:none !important}
@@ -212,7 +216,7 @@ body{background-image:none !important}
   position:relative; display:flex; justify-content:space-between; align-items:flex-end; gap:30px;
   padding:46px 40px 38px; margin-bottom:18px; min-height:230px;
   border-radius:20px; overflow:hidden;
-  background:rgba(20,23,28,.30);
+  background:rgba(247,249,246,.34);
   backdrop-filter:blur(6px) saturate(1.05); -webkit-backdrop-filter:blur(6px) saturate(1.05);
   border:1px solid rgba(255,255,255,.10);
   box-shadow:0 10px 40px rgba(0,0,0,.35);
@@ -246,3 +250,16 @@ body{background-image:none !important}
 html{ background:transparent !important; }
 body{ background:transparent !important; background-image:none !important; }
 /* #sky provides the base color now (it sits at z-index -3 and is always painted) */
+
+
+/* ===== light/dark panel + hero fills (theme-correct glass) ===== */
+[data-theme="dark"] .panel, [data-theme="dark"] .masthead, [data-theme="dark"] .readouts,
+[data-theme="dark"] .settle, [data-theme="dark"] .banner{ background:rgba(16,20,28,.60) !important; }
+[data-theme="dark"] .hero{ background:rgba(16,20,28,.34) !important; }
+/* light-mode text stays dark ink (the earlier override forced light text globally) */
+:root:not([data-theme="dark"]) body{ color:var(--ink) !important; }
+:root:not([data-theme="dark"]) .big, :root:not([data-theme="dark"]) .mid,
+:root:not([data-theme="dark"]) h1, :root:not([data-theme="dark"]) h2{ text-shadow:none; }
+:root:not([data-theme="dark"]) .hero-headline,
+:root:not([data-theme="dark"]) .hn-val,
+:root:not([data-theme="dark"]) .hs-v{ color:var(--ink) !important; text-shadow:none; }

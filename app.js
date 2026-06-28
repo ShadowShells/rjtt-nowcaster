@@ -2006,20 +2006,16 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
   function setSky(){
     const sky=document.getElementById("sky");
     if(!sky) return;
-    // tint the gradient toward grey when cloudy/rainy, warm when clear
     const dark = document.documentElement.getAttribute("data-theme")==="dark";
-    if(mode==="rain"||mode==="storm"){
-      sky.style.background = dark
-        ? "linear-gradient(160deg,#0b0e13 0%,#10151c 55%,#161b22 100%)"
-        : "linear-gradient(160deg,#222a36 0%,#2b333f 55%,#333a44 100%)";
-    } else if(mode==="cloud"){
-      sky.style.background = dark
-        ? "linear-gradient(160deg,#0e1219 0%,#161c25 55%,#1c222b 100%)"
-        : "linear-gradient(160deg,#2a313c 0%,#39414c 55%,#454d57 100%)";
-    } else { // clear -> dawn warmth
-      sky.style.background = dark
-        ? "linear-gradient(160deg,#0d1016 0%,#141a24 45%,#241a0f 100%)"
-        : "linear-gradient(160deg,#1f2733 0%,#3a3a44 40%,#5a4326 100%)";
+    if(dark){
+      if(mode==="rain"||mode==="storm") sky.style.background="linear-gradient(160deg,#0b0e13 0%,#10151c 55%,#161b22 100%)";
+      else if(mode==="cloud") sky.style.background="linear-gradient(160deg,#0e1219 0%,#161c25 55%,#1c222b 100%)";
+      else sky.style.background="linear-gradient(160deg,#0d1016 0%,#141a24 45%,#241a0f 100%)";
+    } else {
+      // LIGHT mode skies: soft daylight tints
+      if(mode==="rain"||mode==="storm") sky.style.background="linear-gradient(160deg,#c4ccd6 0%,#d2dae2 55%,#dce0e4 100%)";
+      else if(mode==="cloud") sky.style.background="linear-gradient(160deg,#cfd7e0 0%,#dde2e8 55%,#e6e9ec 100%)";
+      else sky.style.background="linear-gradient(160deg,#dfe6ee 0%,#eef2f0 45%,#f5efe2 100%)";
     }
   }
 
