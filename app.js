@@ -2056,10 +2056,12 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
 
 /* ================= live weather background ================= */
 (function(){
+  const bt=document.getElementById("build-tag"); if(bt) bt.textContent="v35";
+  try{ console.log("[rjtt] sky engine v35"); }catch(e){}
   const cv=document.getElementById("wx"); if(!cv) return;
   const ctx=cv.getContext("2d");
   let W=0,Hh=0, dpr=Math.min(2,window.devicePixelRatio||1);
-  function size(){ W=cv.clientWidth=window.innerWidth; Hh=cv.clientHeight=window.innerHeight;
+  function size(){ W=window.innerWidth; Hh=window.innerHeight;
     cv.width=W*dpr; cv.height=Hh*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); }
   window.addEventListener("resize", size); size();
 
@@ -2172,12 +2174,25 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
     }
     requestAnimationFrame(frame);
   }
-  classify();
+  function safeClassify(){
+    try{ classify(); }
+    catch(err){
+      const b=document.getElementById("wx-badge");
+      if(b) b.textContent="sky error";
+      try{ console.error("[rjtt] sky engine:", err); }catch(e){}
+    }
+  }
+  // URL override for instant testing: index.html?sky=rain (or storm / cloud / clear)
+  try{
+    const q=new URLSearchParams(location.search).get("sky");
+    if(q && ["clear","cloud","rain","storm"].indexOf(q)>=0) window.__wxForce=q;
+  }catch(e){}
+  safeClassify();
   requestAnimationFrame(frame);
-  setInterval(classify, 60*1000);
-  window.addEventListener("focus", classify);
+  setInterval(safeClassify, 60*1000);
+  window.addEventListener("focus", safeClassify);
   // expose so render() can refresh the sky the instant new data lands
-  window.__wxClassify = classify;
+  window.__wxClassify = safeClassify;
   // sky demo buttons: force a scene (or return to live)
   document.querySelectorAll(".skydemo").forEach(btn=>{
     btn.addEventListener("click", ()=>{
@@ -2185,7 +2200,7 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
       document.querySelectorAll(".skydemo").forEach(b=>b.classList.remove("on"));
       if(sky==="live"){ window.__wxForce = null; }
       else { window.__wxForce = sky; btn.classList.add("on"); }
-      classify();
+      safeClassify();
     });
   });
 })();
