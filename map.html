@@ -87,7 +87,8 @@ body{font-family:var(--mono); background:var(--paper); color:var(--ink); overflo
 <div class="bar">
   <div class="title"><a href="index.html">← RJTT Nowcaster</a> · Tokyo Bay live map</div>
   <div class="spacer"></div>
-  <span class="chip on" id="t-cloud"><span class="dot"></span>Cloud</span>
+  <span class="chip on" id="t-cloud"><span class="dot"></span>Cloud haze</span>
+  <span class="chip" id="t-sat"><span class="dot"></span>Satellite</span>
   <span class="chip" id="t-flow"><span class="dot"></span>Wind flow</span>
   <span class="chip on" id="t-radar"><span class="dot"></span>Rain radar</span>
   <span class="chip on" id="t-wind"><span class="dot"></span>Barbs</span>
@@ -132,24 +133,23 @@ const ONSHORE = new Set([4,5,6,7,8,9]); // E..SSW (16-pt index)
 const map = L.map("map", {zoomControl:true, attributionControl:false}).setView([35.62, 139.80], 10);
 
 // dedicated overlay pane for the weather canvases, sitting above tiles+markers
-map.createPane("wxPane");
-map.getPane("wxPane").style.zIndex = 640;
-map.getPane("wxPane").style.pointerEvents = "none";
-const _wxPane = map.getPane("wxPane");
+map.createPane("satPane");
+map.getPane("satPane").style.zIndex = 250;
+map.createPane("radarPane");
+map.getPane("radarPane").style.zIndex = 300;
+// weather canvases live in a plain viewport-fixed overlay inside the map container —
+// no pane transforms to fight, so nothing can drift or sit in the wrong place.
+const _wxHost = document.createElement("div");
+_wxHost.style.cssText = "position:absolute;inset:0;z-index:640;pointer-events:none";
+map.getContainer().appendChild(_wxHost);
 const cloudCv = document.createElement("canvas");
 cloudCv.id = "cloudCv";
 cloudCv.style.cssText = "position:absolute;left:0;top:0;pointer-events:none;opacity:.62";
 const flowCv = document.createElement("canvas");
 flowCv.id = "flowCv";
 flowCv.style.cssText = "position:absolute;left:0;top:0;pointer-events:none";
-_wxPane.appendChild(cloudCv);
-_wxPane.appendChild(flowCv);
-// keep canvases pinned to the top-left of the viewport as the map pane translates
-function pinCanvases(){
-  const tl = map.containerPointToLayerPoint([0,0]);
-  for(const c of [cloudCv, flowCv]){ c.style.left = tl.x + "px"; c.style.top = tl.y + "px"; }
-}
-map.on("move zoom moveend zoomend viewreset", pinCanvases);
+_wxHost.appendChild(cloudCv);
+_wxHost.appendChild(flowCv);
 // dark basemap (free, no key)
 L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
   maxZoom: 19, subdomains:"abcd"
@@ -253,6 +253,24 @@ function drawBreeze(data){
 }
 
 // ---- JMA high-res precip nowcast overlay ----
+// ---- real satellite cloud layer (RainViewer infrared, web-tile XYZ) ----
+let satLayer=null, satTime=null;
+async function makeSat(){
+  // RainViewer publishes a manifest of recent frames; use the newest infrared satellite frame
+  try{
+    const r=await fetch("https://api.rainviewer.com/public/weather-maps.json",{cache:"no-store"});
+    if(!r.ok) throw 0;
+    const j=await r.json();
+    const ir = j.satellite && j.satellite.infrared;
+    if(!ir || !ir.length) throw 0;
+    const frame = ir[ir.length-1];
+    satTime = frame.time;
+    // tile scheme: {host}{path}/{size}/{z}/{x}/{y}/{color}/{options}.png
+    const url = `${j.host}${frame.path}/256/{z}/{x}/{y}/0/0_0.png`;
+    return L.tileLayer(url, {opacity:.8, minZoom:3, maxZoom:12, pane:"satPane", attribution:"Satellite © RainViewer"});
+  }catch(e){ return null; }
+}
+
 let radarLayer=null;
 async function loadRadar(){
   try{
@@ -264,7 +282,10 @@ async function loadRadar(){
     const bt=frame.basetime, vt=frame.validtime;
     const url=`https://www.jma.go.jp/bosai/jmatile/data/nowc/${bt}/none/${vt}/surf/hrpns/{z}/{x}/{y}.png`;
     if(radarLayer) map.removeLayer(radarLayer);
-    radarLayer=L.tileLayer(url,{opacity:.55, maxZoom:14, minZoom:3});
+    radarLayer=L.tileLayer(url,{opacity:.7, maxZoom:14, maxNativeZoom:10, minZoom:3, pane:"radarPane"});
+    let _rl=0,_re=0;
+    radarLayer.on("tileload",()=>{ if(!_rl++){ const f=document.getElementById("foot"); if(f&&f.textContent.indexOf("radar \u2713")<0) f.textContent+=" \u00b7 radar \u2713"; } });
+    radarLayer.on("tileerror",()=>{ if(++_re>=4 && !_rl){ const f=document.getElementById("foot"); if(f&&f.textContent.indexOf("radar tiles \u2717")<0) f.textContent+=" \u00b7 radar tiles \u2717"; } });
     if(document.getElementById("t-radar").classList.contains("on")) radarLayer.addTo(map);
     return vt;
   }catch(e){ return null; }
@@ -272,7 +293,7 @@ async function loadRadar(){
 
 // ================= gridded wind + cloud field (Open-Meteo) =================
 // Bounding box around Tokyo Bay; a coarse grid is plenty for a smooth field.
-const GRID = {latN:36.05, latS:35.10, lonW:139.20, lonE:140.35, nx:9, ny:8};
+const GRID = {latN:36.90, latS:34.40, lonW:138.30, lonE:141.50, nx:13, ny:11};
 let FIELD=null; // {us, vs, clouds, ...}
 
 async function loadField(){
@@ -305,7 +326,9 @@ async function loadField(){
 function sampleWind(lat,lon){
   if(!FIELD) return null;
   const {lats,lons,us,vs,nx,ny}=FIELD;
-  if(lat>lats[0]||lat<lats[ny-1]||lon<lons[0]||lon>lons[nx-1]) return null;
+  // clamp to the grid so the field extends smoothly to the whole viewport (no hard edge)
+  lat=Math.min(lats[0], Math.max(lats[ny-1], lat));
+  lon=Math.max(lons[0], Math.min(lons[nx-1], lon));
   let j=0; while(j<ny-1 && lat<lats[j+1]) j++;
   let i=0; while(i<nx-1 && lon>lons[i+1]) i++;
   const fy=(lats[j]-lat)/(lats[j]-lats[j+1]||1), fx=(lon-lons[i])/(lons[i+1]-lons[i]||1);
@@ -321,7 +344,9 @@ const cloudCtx=cloudCv.getContext("2d");
 function sampleCloud(lat,lon){
   if(!FIELD) return null;
   const {lats,lons,cl,nx,ny}=FIELD;
-  if(lat>lats[0]||lat<lats[ny-1]||lon<lons[0]||lon>lons[nx-1]) return null;
+  // clamp to the grid so the field extends smoothly to the whole viewport (no hard edge)
+  lat=Math.min(lats[0], Math.max(lats[ny-1], lat));
+  lon=Math.max(lons[0], Math.min(lons[nx-1], lon));
   let j=0; while(j<ny-1 && lat<lats[j+1]) j++;
   let i=0; while(i<nx-1 && lon>lons[i+1]) i++;
   const fy=(lats[j]-lat)/(lats[j]-lats[j+1]||1), fx=(lon-lons[i])/(lons[i+1]-lons[i]||1);
@@ -349,7 +374,14 @@ function drawCloud(){
       const c=sampleCloud(ll.lat,ll.lng);
       const idx=(j*lw+i)*4;
       img.data[idx]=225; img.data[idx+1]=230; img.data[idx+2]=236;
-      img.data[idx+3]= c==null ? 0 : Math.round(Math.max(0,(c-8)/100)*0.9*255);
+      let a=0;
+      if(c!=null){
+        const t=Math.max(0,(c-25)/75);
+        a=Math.pow(t,1.2)*0.5;
+        const n=((i*73+j*151)%17)/17;   // fixed speckle: organic texture, no shimmer
+        a*=0.8+0.35*n;
+      }
+      img.data[idx+3]=Math.round(Math.min(0.55,a)*255);
     }
   }
   _cloudLoCtx.putImageData(img,0,0);
@@ -363,26 +395,30 @@ function drawCloud(){
 // ---- wind particle animation ----
 const flowCtx=flowCv.getContext("2d");
 let particles=[], flowOn=false, flowRAF=null;
-const N_PART=520;
-function resizeFlow(){ const s=map.getSize(); flowCv.width=s.x; flowCv.height=s.y; }
+let N_PART=520;
+function resizeFlow(){ const s=map.getSize(); flowCv.width=s.x; flowCv.height=s.y;
+  N_PART=Math.max(320, Math.min(900, Math.round(s.x*s.y/2600)));
+  while(particles.length<N_PART){ const p={}; seed(p); particles.push(p); }
+  if(particles.length>N_PART) particles.length=N_PART;
+}
 function seed(p){ const s=map.getSize(); p.x=Math.random()*s.x; p.y=Math.random()*s.y; p.age=Math.random()*60; }
 function initParticles(){ particles=[]; for(let k=0;k<N_PART;k++){const p={};seed(p);particles.push(p);} }
 function stepFlow(){
   if(!flowOn){ flowRAF=null; return; }
   const s=map.getSize();
   flowCtx.globalCompositeOperation="destination-out";
-  flowCtx.fillStyle="rgba(0,0,0,0.10)"; flowCtx.fillRect(0,0,s.x,s.y); // fade trails
+  flowCtx.fillStyle="rgba(0,0,0,0.08)"; flowCtx.fillRect(0,0,s.x,s.y); // fade trails
   flowCtx.globalCompositeOperation="source-over";
-  flowCtx.lineWidth=1.4;
+  flowCtx.lineWidth=1.2;
   for(const p of particles){
+    if(p.age>70){ seed(p); continue; }
     const ll=map.containerPointToLatLng([p.x,p.y]);
-    const w=sampleWind(ll.lat,ll.lng);
-    if(!w||p.age>60){ seed(p); continue; }
+    const w=sampleWind(ll.lat,ll.lng) || {u:0,v:0};
     // m/s -> pixels: scale by zoom so it reads at any level
     const sc=0.45*Math.pow(1.35, map.getZoom()-10);
     const nx=p.x+w.u*sc, ny=p.y-w.v*sc;       // screen y is inverted vs north
     const spd=Math.hypot(w.u,w.v);
-    flowCtx.strokeStyle=`rgba(120,200,235,${Math.min(.9,0.25+spd/14)})`;
+    flowCtx.strokeStyle=`rgba(236,243,250,${Math.min(.55,0.12+spd/18)})`;
     flowCtx.beginPath(); flowCtx.moveTo(p.x,p.y); flowCtx.lineTo(nx,ny); flowCtx.stroke();
     p.x=nx; p.y=ny; p.age++;
     if(p.x<0||p.x>s.x||p.y<0||p.y>s.y) seed(p);
@@ -392,7 +428,7 @@ function stepFlow(){
 function startFlow(){ if(flowRAF) return; resizeFlow(); if(!particles.length) initParticles(); flowOn=true; stepFlow(); }
 function stopFlow(){ flowOn=false; if(flowRAF){cancelAnimationFrame(flowRAF);flowRAF=null;} flowCtx.clearRect(0,0,flowCv.width,flowCv.height); }
 
-map.on("move zoom resize", ()=>{ pinCanvases(); drawCloud(); if(flowOn){ resizeFlow(); } });
+map.on("move zoom resize moveend zoomend", ()=>{ drawCloud(); if(flowOn){ resizeFlow(); } });
 
 // ---- toggles ----
 function wireToggle(id, on){
@@ -404,10 +440,25 @@ function wireToggle(id, on){
     if(id==="t-wind"){ layerWind=active; refresh(); }
     if(id==="t-breeze"){ layerBreeze=active; refresh(); }
     if(id==="t-cloud"){ cloudOn=active; drawCloud(); }
+    if(id==="t-sat"){
+      if(active){
+        el.querySelector(".dot").style.background="#E7B53C";
+        (async()=>{
+          if(!satLayer){ satLayer=await makeSat(); }
+          if(satLayer){ satLayer.addTo(map);
+            cloudOn=false; document.getElementById("t-cloud").classList.remove("on"); drawCloud();
+            const f=document.getElementById("foot"); if(f && satTime) f.textContent += ` · satellite ${new Date(satTime*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`;
+          } else {
+            el.classList.remove("on");
+            alert("Live satellite imagery couldn't load right now — the model cloud haze stays available.");
+          }
+        })();
+      } else if(satLayer){ map.removeLayer(satLayer); }
+    }
     if(id==="t-flow"){ active?startFlow():stopFlow(); }
   });
 }
-wireToggle("t-cloud"); wireToggle("t-flow"); wireToggle("t-radar"); wireToggle("t-wind"); wireToggle("t-breeze");
+wireToggle("t-cloud"); wireToggle("t-sat"); wireToggle("t-flow"); wireToggle("t-radar"); wireToggle("t-wind"); wireToggle("t-breeze");
 
 let lastData=[];
 async function refresh(){
