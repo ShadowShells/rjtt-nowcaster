@@ -809,6 +809,53 @@ async function cloudSync(){
   const badge=document.getElementById("a-rec-note");
   if(badge && jrCloudOn()) badge.textContent += " · ☁ cloud-synced";
 }
+/* ===== journal memory: learn from the dashboard's OWN graded days =====
+   Every graded day carries an error (actual high - locked call). Weight past days
+   by similarity to THIS morning (09:00 temp, 06->09 ramp, morning cloud, season),
+   take the weighted mean error, shrink it toward zero while the record is small
+   (n/(n+6)), cap at +/-0.8 deg, and fold it into today's high. */
+function featSnapshot(){
+  try{
+    const o = S.obs || [];
+    const at = h => { let best=null, bd=9; for(const p of o){ const d=Math.abs(p.t-h); if(d<bd){ bd=d; best=p.v; } } return bd<=0.5 ? best : null; };
+    const t9 = at(9), t6 = at(6);
+    const ramp = (t9!=null && t6!=null) ? +(t9-t6).toFixed(2) : null;
+    let cloud = null;
+    if(S.cloud){ const cs = S.cloud.slice(6,11).filter(v=>v!=null); if(cs.length) cloud = Math.round(cs.reduce((a,b)=>a+b,0)/cs.length); }
+    const w = S.winds || []; const lw = w.length ? w[w.length-1] : null;
+    const d = jst(); const doy = Math.floor((d - new Date(d.getFullYear(),0,0)) / 864e5);
+    return { t9: t9!=null?+(+t9).toFixed(1):null, ramp, cloud, wdir: lw?lw.dir:null, wspd: lw?(lw.spd??null):null, doy };
+  }catch(e){ return null; }
+}
+function journalMemory(){
+  let j; try{ j = journalLoad(); }catch(e){ return null; }
+  const today = featSnapshot();
+  const rows = [];
+  for(const k in j){
+    const e = j[k];
+    if(!e || e.actualX==null || !e.lock || e.lock.high==null) continue;
+    const err = e.actualX - e.lock.high;              // + means the call ran COLD (actual came in higher)
+    if(!isFinite(err) || Math.abs(err) > 6) continue; // skip corrupted entries
+    let w = 0.4;                                      // baseline: every graded day informs the global bias
+    if(e.feat && today && e.feat.t9!=null && today.t9!=null){
+      let d = 0;
+      d += Math.abs(e.feat.t9 - today.t9) * 0.5;
+      if(e.feat.ramp!=null && today.ramp!=null) d += Math.abs(e.feat.ramp - today.ramp) * 0.8;
+      if(e.feat.cloud!=null && today.cloud!=null) d += Math.abs(e.feat.cloud - today.cloud) / 25;
+      if(e.feat.doy!=null && today.doy!=null){ let dd = Math.abs(e.feat.doy - today.doy); dd = Math.min(dd, 365-dd); d += Math.min(3, dd/20); }
+      w = 1.6 / (1 + d);                              // similar mornings weigh more
+    }
+    rows.push({ err, w });
+  }
+  if(!rows.length) return null;
+  const W = rows.reduce((a,r)=>a+r.w,0);
+  if(!(W>0)) return null;
+  const mean = rows.reduce((a,r)=>a+r.err*r.w,0) / W;
+  const n = rows.length;
+  let adj = mean * (n/(n+6));                          // shrink hard while the sample is small
+  adj = Math.max(-0.8, Math.min(0.8, adj));            // never move the high more than 0.8 deg
+  return { adj:+adj.toFixed(2), n, mean:+mean.toFixed(2) };
+}
 function journalTick(bucket, high){
   const now = jstParts().dec; const j = journalLoad(); const k = todayISO();
   let dirty = false;
@@ -821,6 +868,11 @@ function journalTick(bucket, high){
       if(c.length>60) c.shift();
       j[k].calls = c; dirty = true;
     }
+  }
+  // snapshot this morning's fingerprint once (fuel for the journal-memory matcher)
+  if(now>=9.2 && now<=16){
+    j[k] = j[k]||{};
+    if(!j[k].feat){ const f = featSnapshot(); if(f && f.t9!=null){ j[k].feat = f; dirty = true; } }
   }
   if(now>=10.25 && now<=13 && !(j[k] && j[k].lock)){
     j[k] = j[k]||{}; j[k].lock = {t:+now.toFixed(2), bucket, high:+(high??0).toFixed(1)};
@@ -1135,6 +1187,17 @@ function computeNowcast(){
   }
   // the projected high can never be below what's already been observed
   if(S.obsMax!=null && out.high < S.obsMax) out.high = S.obsMax;
+  // JOURNAL MEMORY: if this dashboard's own graded calls ran warm/cold on mornings
+  // like this one, nudge today's high (shrunk + capped). Applied HERE so the
+  // headline, buckets and settlement call all share the same corrected number.
+  try{
+    const mem = journalMemory();
+    if(mem && Math.abs(mem.adj) >= 0.05){
+      out.high += mem.adj;
+      out.memAdj = mem.adj; out.memN = mem.n; out.memMean = mem.mean;
+      if(S.obsMax!=null && out.high < S.obsMax) out.high = S.obsMax;
+    }
+  }catch(e){}
   const highs = Object.values(out.perModel).map(p=>p.projHigh);
   out.lo = Math.min(...highs); out.hi = Math.max(...highs);
   // peak timing
@@ -1395,6 +1458,10 @@ function render(nc){
     }
     if(bk && bk.analogUsed!=null && S.analog && S.analog.n && vEl){
       vNote.textContent += ` · ${S.analog.n} analog days lean ${fmt1(bk.analogUsed)}° (25% weight in the verdict)`;
+    }
+    if(nc && nc.memN && nc.memAdj!=null && vNote){
+      const ranWord = nc.memMean > 0 ? "cold" : "warm";
+      vNote.textContent += ` · memory: my calls ran ${fmt1(Math.abs(nc.memMean))}° ${ranWord} on ${nc.memN} graded day${nc.memN>1?"s":""} like this → ${nc.memAdj>0?"+":"-"}${fmt1(Math.abs(nc.memAdj))}° applied`;
     }
     // coherence check: does the verdict agree with the FOLLOW model?
     let followBk = null, followNm = null;
