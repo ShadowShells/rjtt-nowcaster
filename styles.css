@@ -273,7 +273,7 @@ body{ background:transparent !important; background-image:none !important; }
 
 
 /* solar & thermal cycle */
-.solgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
-.solgrid>div{padding:12px 16px; border-top:1px solid rgba(128,140,160,.16); min-width:0}
-.solgrid .mid{white-space:nowrap; font-size:clamp(15px,1.6vw,22px)}
+.solgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(235px,1fr))}
+.solgrid>div{padding:12px 16px; border-top:1px solid rgba(128,140,160,.16); min-width:0; overflow:hidden}
+.solgrid .mid{white-space:nowrap; font-size:clamp(15px,1.6vw,21px)}
 .sol-note{font-family:var(--mono); font-size:12px; color:var(--ink-soft); padding:8px 16px 14px}

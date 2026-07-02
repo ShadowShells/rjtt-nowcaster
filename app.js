@@ -1179,7 +1179,11 @@ function renderSolar(nc){
   g+=mk(sd.riseMin,"↑")+mk(sd.noonMin,"☉")+mk(sd.setMin,"↓");
   const eNow=solarElev(sd,nowMin);
   g+=`<line x1="${X(nowMin)}" y1="8" x2="${X(nowMin)}" y2="196" stroke="rgba(226,232,240,.5)"/><circle cx="${X(nowMin)}" cy="${Y(eNow)}" r="6" fill="var(--accent)"/><text x="${X(nowMin)}" y="${Math.max(12,Y(eNow)-12)}" font-size="12" font-weight="700" fill="var(--accent)" text-anchor="middle" font-family="var(--mono)">NOW</text>`;
-  for(let h=0;h<=24;h+=3) g+=`<text x="${X(h*60)}" y="213" font-size="10" fill="var(--ink-soft)" text-anchor="middle" font-family="var(--mono)">${h===0||h===24?"12a":h<12?h+"a":h===12?"12p":(h-12)+"p"}</text>`;
+  for(let h=0;h<=24;h+=3){
+    const anch = h===0 ? "start" : h===24 ? "end" : "middle";
+    const xx = h===0 ? 4 : h===24 ? 996 : X(h*60);
+    g+=`<text x="${xx}" y="213" font-size="10" fill="var(--ink-soft)" text-anchor="${anch}" font-family="var(--mono)">${h===0||h===24?"12a":h<12?h+"a":h===12?"12p":(h-12)+"p"}</text>`;
+  }
   svg.innerHTML=g;
   // status
   const stEl=document.getElementById("sol-status");
