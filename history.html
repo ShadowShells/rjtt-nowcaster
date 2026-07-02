@@ -20,9 +20,12 @@
     background:transparent; border:1px solid var(--ink-soft); color:var(--ink)}
   .navbtn:hover{background:var(--accent); border-color:var(--accent); color:#fff}
   .wubtn{font-family:var(--mono); font-size:12.5px; color:var(--jma); font-weight:600; text-decoration:underline; margin-left:auto}
-  .sumgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:0}
-  .sumgrid>div{padding:16px 18px; border-right:1px solid rgba(255,255,255,.08)}
+  .sumgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:0}
+  .sumgrid>div{padding:16px 18px; border-right:1px solid rgba(255,255,255,.08); overflow:hidden}
   .sumgrid>div:last-child{border-right:none}
+  /* keep the big numbers inside their cells at any width */
+  .sumgrid .big{font-size:clamp(26px, 3.1vw, 42px); line-height:1.05; white-space:nowrap}
+  .sumgrid .mid{white-space:nowrap}
   table.obs{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:13.5px; font-variant-numeric:tabular-nums}
   table.obs th{font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-soft);
     text-align:left; padding:10px 14px; border-bottom:1px solid rgba(255,255,255,.12); position:sticky; top:0; backdrop-filter:blur(8px)}
