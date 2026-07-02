@@ -611,7 +611,7 @@ function dayOfYear(){
 }
 async function maybeFetchArchive(){
   try{
-    const cached = localStorage.getItem("rjtt_arc_v1");
+    const cached = localStorage.getItem("rjtt_arc_v2");
     if(cached){ const o = JSON.parse(cached); if(o.fetched === todayISO() && o.days && o.days.length){ S.archive = o; return; } }
   }catch(e){}
   try{
@@ -626,8 +626,8 @@ async function maybeFetchArchive(){
     for(let i=0; i+23 < T.length; i+=24){
       const t6 = T[i+6], t9 = T[i+9];
       if(t6==null || t9==null) continue;
-      let hi=-1e9, hiH=14;
-      for(let h=0; h<24; h++){ const v=T[i+h]; if(v!=null && v>hi){hi=v; hiH=h;} }
+      let hi=-1e9, hiH=14, lo=1e9, loH=5;
+      for(let h=0; h<24; h++){ const v=T[i+h]; if(v!=null){ if(v>hi){hi=v; hiH=h;} if(v<lo){lo=v; loH=h;} } }
       if(hi<-100) continue;
       let cs=0, cn=0;
       for(let h=6; h<13; h++){ const v=C[i+h]; if(v!=null){cs+=v; cn++;} }
@@ -637,11 +637,11 @@ async function maybeFetchArchive(){
       days.push({doy, t9:+t9.toFixed(1), ramp:+(t9-t6).toFixed(2),
                  cloud: cn?Math.round(cs/cn):null,
                  on: (wd!=null)?((wd>=70&&wd<=215)?1:0):null,
-                 hi:+hi.toFixed(1), hiH});
+                 hi:+hi.toFixed(1), hiH, lo:+lo.toFixed(1), loH, date: times[i].slice(0,10)});
     }
     if(!days.length) throw new Error("empty archive");
     S.archive = {fetched: todayISO(), days};
-    try{ localStorage.setItem("rjtt_arc_v1", JSON.stringify(S.archive)); }catch(e){}
+    try{ localStorage.setItem("rjtt_arc_v2", JSON.stringify(S.archive)); }catch(e){}
   }catch(e){ /* analog panel degrades gracefully */ }
 }
 function computeAnalogs(){
@@ -1114,6 +1114,109 @@ function interpHour(series, x){
   if(a==null) return b; if(b==null) return a;
   return a + (b-a)*(x-lo);
 }
+/* ===== solar & thermal cycle: pure geometry + archive peak-timing climatology ===== */
+const _r=d=>d*Math.PI/180, _g=r=>r*180/Math.PI;
+function solarDay(ms){
+  const d=new Date(ms);
+  const doy=Math.floor((Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate())-Date.UTC(d.getUTCFullYear(),0,0))/864e5);
+  const g=2*Math.PI/365*(doy-1+0.5);
+  const eq=229.18*(0.000075+0.001868*Math.cos(g)-0.032077*Math.sin(g)-0.014615*Math.cos(2*g)-0.040849*Math.sin(2*g));
+  const decl=0.006918-0.399912*Math.cos(g)+0.070257*Math.sin(g)-0.006758*Math.cos(2*g)+0.000907*Math.sin(2*g)-0.002697*Math.cos(3*g)+0.00148*Math.sin(3*g);
+  const phi=_r(LAT);
+  function haFor(zen){ const c=Math.cos(_r(zen))/(Math.cos(phi)*Math.cos(decl))-Math.tan(phi)*Math.tan(decl); return (c<-1||c>1)?null:_g(Math.acos(c)); }
+  const ha0=haFor(90.833), ha6=haFor(96);
+  const toJ=um=>um+540;
+  const noon=toJ(720-4*LON-eq);
+  const out={eq, decl, noonMin:noon, maxElev:90-Math.abs(LAT-_g(decl)),
+    riseMin:ha0!=null?toJ(720-4*(LON+ha0)-eq):null, setMin:ha0!=null?toJ(720-4*(LON-ha0)-eq):null,
+    dawnMin:ha6!=null?toJ(720-4*(LON+ha6)-eq):null, duskMin:ha6!=null?toJ(720-4*(LON-ha6)-eq):null};
+  out.dayLen=(out.riseMin!=null&&out.setMin!=null)?out.setMin-out.riseMin:0;
+  return out;
+}
+function solarElev(sd, jstMin){
+  const tst=jstMin+sd.eq+4*LON-540;
+  const ha=_r(tst/4-180);
+  const phi=_r(LAT);
+  const cz=Math.sin(phi)*Math.sin(sd.decl)+Math.cos(phi)*Math.cos(sd.decl)*Math.cos(ha);
+  return 90-_g(Math.acos(Math.max(-1,Math.min(1,cz))));
+}
+function peakClimo(){
+  const days=(S.archive&&S.archive.days)?S.archive.days.slice(-30):[];
+  function stats(a){
+    if(a.length<10) return null;
+    const st=[...a].sort((x,y)=>x-y), q=p=>st[Math.min(st.length-1,Math.round(p*(st.length-1)))];
+    const hist={}; a.forEach(h=>{hist[h]=(hist[h]||0)+1;});
+    return {p25:q(.25), med:q(.5), p75:q(.75), hist, n:a.length};
+  }
+  return { hi:stats(days.map(d=>d.hiH).filter(h=>h!=null)),
+           lo:stats(days.map(d=>d.loH).filter(h=>h!=null)),
+           recent:days.slice(-5).filter(d=>d.date&&d.lo!=null) };
+}
+function _hm(min){ min=((min%1440)+1440)%1440; let h=Math.floor(min/60), m=Math.round(min%60); if(m===60){h=(h+1)%24;m=0;} return `${h}:${p2(m)}`; }
+function _dur(min){ return `${Math.floor(min/60)}h ${p2(Math.round(min%60))}m`; }
+function renderSolar(nc){
+  const svg=document.getElementById("sol-arc"); if(!svg) return;
+  const sd=solarDay(Date.now()), sy=solarDay(Date.now()-864e5);
+  const nowMin=jstParts().dec*60;
+  const cl=peakClimo();
+  const X=t=>t/1440*1000, HY=150, K=(HY-20)/90;
+  const Y=e=>HY-Math.max(e,-12)*K;
+  let pts=[];
+  for(let m=0;m<=1440;m+=10) pts.push(`${X(m).toFixed(1)},${Y(solarElev(sd,m)).toFixed(1)}`);
+  let g=`<line x1="0" y1="${HY}" x2="1000" y2="${HY}" stroke="rgba(128,140,160,.35)"/><text x="994" y="${HY-6}" font-size="11" fill="var(--ink-soft)" text-anchor="end" font-family="var(--mono)">horizon</text>`;
+  // typical bands from climatology
+  if(cl.hi){ g+=`<rect x="${X(cl.hi.p25*60)}" y="20" width="${X((cl.hi.p75+1)*60)-X(cl.hi.p25*60)}" height="${HY-20}" fill="rgba(231,181,60,.10)"/>
+    <line x1="${X((cl.hi.med+0.5)*60)}" y1="20" x2="${X((cl.hi.med+0.5)*60)}" y2="${HY}" stroke="rgba(231,181,60,.8)" stroke-dasharray="5 4" stroke-width="1.6"/>
+    <text x="${X((cl.hi.med+0.5)*60)}" y="14" font-size="11" fill="rgba(231,181,60,.95)" text-anchor="middle" font-family="var(--mono)">typical high</text>`;
+    for(const[h,n] of Object.entries(cl.hi.hist)){ if(n<2) continue; const cx=X((+h+0.5)*60);
+      g+=`<line x1="${cx}" y1="34" x2="${cx}" y2="46" stroke="rgba(231,181,60,.7)"/><circle cx="${cx}" cy="28" r="8" fill="rgba(231,181,60,.9)"/><text x="${cx}" y="31.5" font-size="10" font-weight="700" fill="#1a1206" text-anchor="middle" font-family="var(--mono)">${n}</text>`; } }
+  if(cl.lo){ g+=`<line x1="${X((cl.lo.med+0.5)*60)}" y1="${HY}" x2="${X((cl.lo.med+0.5)*60)}" y2="196" stroke="rgba(110,168,254,.7)" stroke-dasharray="5 4"/><text x="${X((cl.lo.med+0.5)*60)}" y="208" font-size="11" fill="rgba(110,168,254,.95)" text-anchor="middle" font-family="var(--mono)">typical low</text>`;
+    for(const[h,n] of Object.entries(cl.lo.hist)){ if(n<2) continue; const cx=X((+h+0.5)*60);
+      g+=`<line x1="${cx}" y1="${HY+8}" x2="${cx}" y2="${HY+18}" stroke="rgba(110,168,254,.7)"/><circle cx="${cx}" cy="${HY+24}" r="8" fill="rgba(110,168,254,.9)"/><text x="${cx}" y="${HY+27.5}" font-size="10" font-weight="700" fill="#0d1016" text-anchor="middle" font-family="var(--mono)">${n}</text>`; } }
+  // sun path + markers
+  g+=`<polyline fill="none" stroke="var(--jma)" stroke-width="2.6" points="${pts.join(" ")}" opacity=".95"/>`;
+  const mk=(m,lab)=>{ if(m==null) return ""; return `<line x1="${X(m)}" y1="20" x2="${X(m)}" y2="${HY}" stroke="rgba(128,140,160,.3)" stroke-dasharray="3 4"/><text x="${X(m)}" y="${HY+16}" font-size="11.5" fill="var(--ink)" text-anchor="middle" font-family="var(--mono)" font-weight="600">${lab} ${_hm(m)}</text>`; };
+  g+=mk(sd.riseMin,"↑")+mk(sd.noonMin,"☉")+mk(sd.setMin,"↓");
+  const eNow=solarElev(sd,nowMin);
+  g+=`<line x1="${X(nowMin)}" y1="8" x2="${X(nowMin)}" y2="196" stroke="rgba(226,232,240,.5)"/><circle cx="${X(nowMin)}" cy="${Y(eNow)}" r="6" fill="var(--accent)"/><text x="${X(nowMin)}" y="${Math.max(12,Y(eNow)-12)}" font-size="12" font-weight="700" fill="var(--accent)" text-anchor="middle" font-family="var(--mono)">NOW</text>`;
+  for(let h=0;h<=24;h+=3) g+=`<text x="${X(h*60)}" y="213" font-size="10" fill="var(--ink-soft)" text-anchor="middle" font-family="var(--mono)">${h===0||h===24?"12a":h<12?h+"a":h===12?"12p":(h-12)+"p"}</text>`;
+  svg.innerHTML=g;
+  // status
+  const stEl=document.getElementById("sol-status");
+  if(stEl){
+    let st="";
+    if(nowMin<sd.dawnMin||nowMin>sd.duskMin) st="night — radiative cooling only";
+    else if(nowMin<sd.riseMin) st="first light — cooling ending";
+    else if(cl.hi && nowMin>=cl.hi.p25*60 && nowMin<(cl.hi.p75+1)*60) st="⚑ PEAK WINDOW — highs usually print now";
+    else if(cl.hi && nowMin>=(cl.hi.p75+1)*60 && nowMin<=sd.setMin) st="↘ afternoon cooling — net loss exceeds incoming sun";
+    else if(nowMin<=sd.noonMin) st="heating phase — sun input exceeds losses";
+    else st="past solar noon — heating momentum fading";
+    stEl.textContent=st;
+  }
+  // stats grid
+  const grid=document.getElementById("sol-stats");
+  if(grid){
+    const dLeft=Math.max(0,(sd.setMin||nowMin)-nowMin);
+    const frac=(sd.riseMin!=null&&sd.setMin!=null)?Math.round(100*Math.min(1,Math.max(0,(nowMin-sd.riseMin)/(sd.setMin-sd.riseMin)))):0;
+    const dd=Math.round((sd.dayLen-sy.dayLen)*60);
+    const strength=eNow<=0?0:Math.round(100*Math.sin(_r(eNow))/Math.sin(_r(sd.maxElev)));
+    const cell=(l,v,s)=>`<div><div class="label">${l}</div><div class="mid">${v}</div><div class="sub">${s||""}</div></div>`;
+    grid.innerHTML=
+      cell("Sunrise",_hm(sd.riseMin),"dawn "+_hm(sd.dawnMin))+
+      cell("Sunset",_hm(sd.setMin),"dusk "+_hm(sd.duskMin))+
+      cell("Solar noon",_hm(sd.noonMin),`max sun ${Math.round(sd.maxElev)}°`)+
+      cell("Day length",_dur(sd.dayLen),(dd>=0?"+":"−")+Math.abs(dd)+"s vs yesterday")+
+      cell("Daylight left",_dur(dLeft),`${frac}% of daylight elapsed`)+
+      cell("Sun strength",strength+"%","of today's peak · geometry only")+
+      cell("Typical high",cl.hi?`${_hm(cl.hi.p25*60)}–${_hm((cl.hi.p75+1)*60)}`:"building history",cl.hi?`median ${_hm((cl.hi.med+0.5)*60)} · ${cl.hi.n}d`:"needs archive")+
+      cell("Typical low",cl.lo?`${_hm(cl.lo.p25*60)}–${_hm((cl.lo.p75+1)*60)}`:"building history",cl.lo?`median ${_hm((cl.lo.med+0.5)*60)} · ${cl.lo.n}d`:"needs archive");
+    const rec=document.getElementById("sol-recent");
+    if(rec && cl.recent && cl.recent.length){
+      const wd=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+      rec.textContent="recent: "+cl.recent.map(d=>`${wd[new Date(d.date+"T00:00:00Z").getUTCDay()]} ${fmt1(d.hi)}°/${fmt1(d.lo)}°`).join(" · ")+" (reanalysis)";
+    }
+  }
+}
 /* ===== jump watch: early warning that the temperature is about to break upward =====
    The July-1 pattern: obs plateau BELOW what the warmest credible model still expects,
    heating hours remain, and the south-sector wind is trending up (mixing strengthening).
@@ -1309,6 +1412,7 @@ function render(nc){
 
   updateHero(nc);
   if(window.__wxClassify) try{ window.__wxClassify(); }catch(e){}
+  try{ renderSolar(nc); }catch(e){}
 
   // readouts
   const elN = document.getElementById("r-nowcast");
