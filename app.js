@@ -1114,6 +1114,43 @@ function interpHour(series, x){
   if(a==null) return b; if(b==null) return a;
   return a + (b-a)*(x-lo);
 }
+/* ===== jump watch: early warning that the temperature is about to break upward =====
+   The July-1 pattern: obs plateau BELOW what the warmest credible model still expects,
+   heating hours remain, and the south-sector wind is trending up (mixing strengthening).
+   Two triggers: (a) wind trend = watch BEFORE the jump; (b) first accelerated 10-min
+   tick = break underway. Effect is deliberately modest: a small warm premium on the
+   high (never past the warmest model) plus a transparent note - a warning light, not
+   a call flip. */
+function jumpRisk(obsMax, hiModel){
+  try{
+    const now = jstParts().dec;
+    if(now < 10.5 || now > 14.75) return null;           // only while heating time remains
+    const o = S.obs||[];
+    if(o.length < 4 || obsMax==null || hiModel==null || !isFinite(hiModel)) return null;
+    const headroom = hiModel - obsMax;
+    // (b) acceleration: the last tick(s) already jumped — self-evident, no headroom needed
+    let accel=false, d10=0;
+    if(o.length>=2){
+      d10 = o[o.length-1].v - o[o.length-2].v;
+      const d20 = o.length>=3 ? (o[o.length-1].v - o[o.length-3].v) : 0;
+      if(d10>=0.5 || d20>=0.7) accel=true;
+    }
+    if(accel) return { level:2, headroom:+Math.max(0,headroom).toFixed(1), d10:+d10.toFixed(1), windUp:false, accel:true };
+    // (a) anticipatory wind-trend watch: needs real model upside left to matter
+    if(headroom < 0.6) return null;
+    let windUp=false;
+    const w=(S.winds||[]).filter(x=>x&&x.spd!=null);
+    if(w.length>=3){
+      const cur=w[w.length-1];
+      const past=w.filter(x=>x.t<=cur.t-0.5);
+      const ref=past.length?past[past.length-1]:null;
+      const sSector = cur.dir!=null && cur.dir>=6 && cur.dir<=11;
+      if(ref && sSector && cur.spd>=3 && (cur.spd-ref.spd)>=0.5) windUp=true;
+    }
+    if(!windUp) return null;
+    return { level:1, headroom:+headroom.toFixed(1), d10:+d10.toFixed(1), windUp:true, accel:false };
+  }catch(e){ return null; }
+}
 function computeNowcast(){
   const now = jstParts().dec;
   const out = {perModel:{}, blendCurve:null, high:null, lo:null, hi:null, peakT:null, peakSet:false};
@@ -1200,6 +1237,14 @@ function computeNowcast(){
   }catch(e){}
   const highs = Object.values(out.perModel).map(p=>p.projHigh);
   out.lo = Math.min(...highs); out.hi = Math.max(...highs);
+  // JUMP WATCH: small warm premium while an upward break is threatening (capped at the warmest model)
+  const jr = jumpRisk(S.obsMax, out.hi);
+  if(jr){
+    out.jump = jr;
+    const bump = jr.level===2 ? 0.3 : 0.15;
+    out.high = Math.max(out.high, Math.min(out.high + bump, out.hi));
+    if(S.obsMax!=null && out.high < S.obsMax) out.high = S.obsMax;
+  }
   // peak timing
   let pk=-1e9, pt=null;
   for(let h=Math.floor(now); h<24; h++){
@@ -1462,6 +1507,11 @@ function render(nc){
     if(nc && nc.memN && nc.memAdj!=null && vNote){
       const ranWord = nc.memMean > 0 ? "cold" : "warm";
       vNote.textContent += ` · memory: my calls ran ${fmt1(Math.abs(nc.memMean))}° ${ranWord} on ${nc.memN} graded day${nc.memN>1?"s":""} like this → ${nc.memAdj>0?"+":"-"}${fmt1(Math.abs(nc.memAdj))}° applied`;
+    }
+    if(nc && nc.jump && vNote){
+      vNote.textContent += nc.jump.level===2
+        ? ` · ⚡ TEMP JUMPING: +${fmt1(nc.jump.d10)}° in the last 10 min${nc.jump.headroom>0?` with ${fmt1(nc.jump.headroom)}° of model upside`:" — past the warmest model"} — break underway`
+        : ` · ⚡ jump watch: south wind rising with ${fmt1(nc.jump.headroom)}° of warm-model upside left — upward break possible`;
     }
     // coherence check: does the verdict agree with the FOLLOW model?
     let followBk = null, followNm = null;

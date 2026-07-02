@@ -105,17 +105,23 @@ function parseBlocks(objs, key){
   return rows;
 }
 /* ---- day summary + the settlement read ---- */
-function summarize(rows){
+function summarize(rows, hourly){
   const temps=rows.filter(r=>r.temp!=null&&isFinite(r.temp));
   if(!temps.length) return null;
   let mx=temps[0], mn=temps[0];
   for(const r of temps){ if(r.temp>mx.temp) mx=r; if(r.temp<mn.temp) mn=r; }
   const rain=rows.reduce((a,r)=>a+(r.rain||0),0);
   let pw=null; for(const r of rows){ if(r.spd!=null && (pw==null||r.spd>pw.spd)) pw=r; }
+  let jump=null;
+  if(!hourly)
+  for(let i=1;i<temps.length;i++){
+    const d=temps[i].temp-temps[i-1].temp;
+    if(d>=0.5 && (!jump||d>jump.d)) jump={d:+d.toFixed(1), hh:temps[i].hh, mm:temps[i].mm};
+  }
   const settled=Math.round(mx.temp);
   const frac=mx.temp-Math.floor(mx.temp);
   const nearEdge=Math.abs(frac-0.5)<=0.15;
-  return {mx,mn,rain,pw,settled,nearEdge};
+  return {mx,mn,rain,pw,settled,nearEdge,jump};
 }
 
 async function loadAmedas(key, isToday){
@@ -159,12 +165,17 @@ function drawChart(rows){
 function renderTable(rows, hourly){
   const tb=document.getElementById("obs-body");
   if(!rows.length){ tb.innerHTML=`<tr><td colspan="6" class="sub" style="padding:18px">no observations available for this date</td></tr>`; return; }
+  const jumps=new Set();
+  if(!hourly){
+    const ts=rows.filter(r=>r.temp!=null);
+    for(let i=1;i<ts.length;i++) if(ts[i].temp-ts[i-1].temp>=0.5) jumps.add(ts[i].t);
+  }
   const temps=rows.filter(r=>r.temp!=null); let mxT=null;
   if(temps.length){ mxT=temps.reduce((a,b)=>b.temp>a.temp?b:a).t; }
   tb.innerHTML=[...rows].reverse().map(r=>{
     const wind = r.spd!=null ? `${fmt1(r.spd)} m/s ${hourly?deg16(r.degdir):dir16(r.dir)}` : "—";
     return `<tr${r.t===mxT?' class="mx"':''}>
-      <td>${p2(r.hh)}:${p2(r.mm)}</td>
+      <td>${jumps.has(r.t)?"⚡ ":""}${p2(r.hh)}:${p2(r.mm)}</td>
       <td>${r.temp!=null?fmt1(r.temp)+"°":"—"}</td>
       <td>${wind}</td>
       <td>${r.rain!=null?fmt1(r.rain)+" mm":"—"}</td>
@@ -182,7 +193,8 @@ function renderSummary(sum, iso){
     <div><div class="label">Settles (rounded)</div><div class="big">${sum.settled}°C</div><div class="sub">${sum.nearEdge?"⚠ near the rounding edge — confirm the prints":"clear of the edge"}</div></div>
     <div><div class="label">Day min</div><div class="mid">${fmt1(sum.mn.temp)}°C</div><div class="sub">at ${p2(sum.mn.hh)}:${p2(sum.mn.mm)}</div></div>
     <div><div class="label">Rain total</div><div class="mid">${fmt1(sum.rain)} mm</div><div class="sub">from 10-min buckets</div></div>
-    <div><div class="label">Peak wind</div><div class="mid">${sum.pw?fmt1(sum.pw.spd)+" m/s":"—"}</div><div class="sub">${sum.pw?dir16(sum.pw.dir)+" at "+p2(sum.pw.hh)+":"+p2(sum.pw.mm):""}</div></div>`;
+    <div><div class="label">Peak wind</div><div class="mid">${sum.pw?fmt1(sum.pw.spd)+" m/s":"—"}</div><div class="sub">${sum.pw?dir16(sum.pw.dir)+" at "+p2(sum.pw.hh)+":"+p2(sum.pw.mm):""}</div></div>
+    <div><div class="label">Fastest 10-min climb</div><div class="mid">${sum.jump?"⚡ +"+fmt1(sum.jump.d)+"°":"steady"}</div><div class="sub">${sum.jump?"at "+p2(sum.jump.hh)+":"+p2(sum.jump.mm)+" — jump day":"no 10-min step ≥ +0.5°"}</div></div>`;
   // journal cross-reference
   try{
     const j=JSON.parse(localStorage.getItem("rjtt_jr_v1")||"{}");
@@ -213,7 +225,7 @@ async function loadDay(iso){
   } else {
     document.getElementById("res-note").textContent="· 10-minute AMeDAS observations";
   }
-  renderSummary(summarize(rows), iso);
+  renderSummary(summarize(rows, hourly), iso);
   drawChart(rows);
   renderTable(rows, hourly);
 }
