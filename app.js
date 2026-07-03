@@ -10,6 +10,7 @@ const MODELS = [
   {key:"ecmwf_aifs025", name:"AIFS·AI", color:"var(--aifs)", hex:"#8C5A7A"},
   {key:"ukmo_seamless", name:"UKMO",  color:"var(--ukmo)", hex:"#B08D3E"},
   {key:"gem_seamless",  name:"GEM",   color:"var(--gem)",  hex:"#4E8A78"},
+  {key:"meteofrance_seamless", name:"ARPEGE", color:"#3E7CB1", hex:"#3E7CB1"},
 ];
 // Neighbor AMeDAS stations for spatial / sea-breeze-front context
 const NEIGHBORS = [
@@ -322,6 +323,48 @@ async function fetchYdayObs(){
   if(y==null && d2==null) throw new Error("no past obs");
 }
 
+/* ===== per-model daily error log (feeds the 7d rank column) =====
+   Between 10:15-16:00 JST the raw daily max each model shows for TODAY is locked;
+   the next day it is graded against the AMeDAS actual. Last 30 days kept. */
+const MLOG_KEY="rjtt_mlog_v1";
+function mlogLoad(){ try{ return JSON.parse(localStorage.getItem(MLOG_KEY)||"{}"); }catch(e){ return {}; } }
+function mlogSave(j){ try{ localStorage.setItem(MLOG_KEY, JSON.stringify(j)); }catch(e){} }
+function modelLogTick(){
+  try{
+    const now=jstParts().dec, k=todayISO();
+    const j=mlogLoad(); let dirty=false;
+    if(now>=10.25 && now<=16 && !(j[k]&&j[k].models)){
+      const snap={};
+      for(const m of MODELS){
+        const T=S.models[m.key]; if(!T) continue;
+        let mx=-1e9; for(let h=0;h<24;h++){ const v=T[h]; if(v!=null&&v>mx) mx=v; }
+        if(mx>-100) snap[m.key]=+mx.toFixed(1);
+      }
+      if(Object.keys(snap).length>=3){ j[k]=j[k]||{}; j[k].models=snap; dirty=true; }
+    }
+    const y=new Date(jst().getTime()-864e5);
+    const yk=`${y.getUTCFullYear()}-${p2(y.getUTCMonth()+1)}-${p2(y.getUTCDate())}`;
+    if(j[yk] && j[yk].models && j[yk].actual==null && S.ydayObsMax!=null){ j[yk].actual=S.ydayObsMax; dirty=true; }
+    const keys=Object.keys(j).sort();
+    if(keys.length>30){ for(const kk of keys.slice(0,keys.length-30)) delete j[kk]; dirty=true; }
+    if(dirty) mlogSave(j);
+  }catch(e){}
+}
+function compute7d(){
+  try{
+    const j=mlogLoad();
+    const graded=Object.keys(j).filter(k=>j[k].actual!=null&&j[k].models).sort().slice(-7);
+    if(graded.length<3) return {ranks:{}, mae:{}, n:graded.length};
+    const errs={};
+    for(const k of graded){ const e=j[k];
+      for(const mk in e.models){ (errs[mk]=errs[mk]||[]).push(Math.abs(e.models[mk]-e.actual)); } }
+    const mae={};
+    for(const mk in errs){ if(errs[mk].length>=3) mae[mk]=+(errs[mk].reduce((a,b)=>a+b,0)/errs[mk].length).toFixed(2); }
+    const order=Object.keys(mae).sort((a,b)=>mae[a]-mae[b]);
+    const ranks={}; order.forEach((mk,i)=>ranks[mk]=i+1);
+    return {ranks, mae, n:graded.length};
+  }catch(e){ return {ranks:{}, mae:{}, n:0}; }
+}
 /* ================= model skill ranking ================= */
 function computeSkill(){
   // Score = 0.6 × mean |daily-max error| over the last 2 verified days
@@ -1459,6 +1502,7 @@ function render(nc){
   updateHero(nc);
   if(window.__wxClassify) try{ window.__wxClassify(); }catch(e){}
   try{ renderSolar(nc); }catch(e){}
+  try{ modelLogTick(); }catch(e){}
 
   // readouts
   const elN = document.getElementById("r-nowcast");
@@ -1844,20 +1888,25 @@ function render(nc){
 
   // model table
   const rows = document.getElementById("model-rows"); rows.innerHTML="";
+  const _sev = compute7d();
   for(const m of MODELS){
     const pm = nc.perModel[m.key];
     const tr = document.createElement("tr");
     const rk = nc.skill && nc.skill.ranks ? nc.skill.ranks[m.key] : null;
     const rkColor = rk==null ? "var(--ink-soft)" : rk<=2 ? "var(--ok)" : (nc.skill.n - rk < 2) ? "var(--bad)" : "var(--ink-soft)";
+    const r7 = _sev.ranks[m.key] || null;
+    let peakH=null; { const Tc=S.models[m.key]; if(Tc){ let pv=-1e9; for(let h=0;h<24;h++){ const v=Tc[h]; if(v!=null&&v>pv){pv=v;peakH=h;} } } }
     tr.innerHTML = pm ? `
       <td class="model-name"><span class="pen" style="background:${m.hex}"></span>${m.name}</td>
       <td style="text-align:left"><b style="color:${rkColor}">${rk!=null?"#"+rk:"—"}</b></td>
+      <td style="text-align:left"><b style="color:${r7&&r7<=2?"var(--ok)":"var(--ink-soft)"}">${r7?"#"+r7:"·"}</b></td>
       <td>${fmt1(pm.rawMax)}°C</td>
+      <td>${peakH!=null?p2(peakH)+":00":"—"}</td>
       <td>${fmt1(pm.modelNow)}°C</td>
       <td><span style="color:${pm.bias==null?"inherit":pm.bias>=0.3?"var(--accent)":pm.bias<=-0.3?"var(--jma)":"inherit"};font-weight:${pm.bias!=null&&Math.abs(pm.bias)>=0.3?"600":"400"}">${pm.bias==null?"—":(pm.bias>=0?"+":"")+fmt1(pm.bias)}°</span></td>
       <td>${(S.ydayModelMax[m.key]!=null && S.ydayObsMax!=null) ? ((S.ydayModelMax[m.key]-S.ydayObsMax>=0?"+":"")+fmt1(S.ydayModelMax[m.key]-S.ydayObsMax)+"°") : "—"}</td>
       <td class="proj">${fmt1(pm.projHigh)}°C</td>`
-      : `<td class="model-name"><span class="pen" style="background:${m.hex}"></span>${m.name}</td><td colspan="6" style="color:var(--ink-soft)">unavailable</td>`;
+      : `<td class="model-name"><span class="pen" style="background:${m.hex}"></span>${m.name}</td><td colspan="8" style="color:var(--ink-soft)">unavailable</td>`;
     rows.appendChild(tr);
   }
   const tom = MODELS.filter(m=>S.tomorrow[m.key]!=null)
@@ -1867,6 +1916,7 @@ function render(nc){
   if(S.jmaFx) refBits.push(`JMA official ${S.jmaFx.name} high: ${S.jmaFx.max}°C`);
   if(S.ydayObsMax!=null) refBits.push(`yday actual: ${fmt1(S.ydayObsMax)}°C`);
   if(tom) refBits.push(`Tomorrow raw maxes: ${tom}C`);
+  if(_sev.n) refBits.push(`7d rank: ${_sev.n} graded day${_sev.n>1?"s":""}`);
   document.getElementById("tomorrow-line").textContent = refBits.join("  ·  ");
 
   // strategist read
@@ -2180,9 +2230,48 @@ async function refresh(){
   document.querySelector(".readouts").classList.add("flash");
   document.getElementById("btn-refresh").disabled = false;
 }
-document.getElementById("btn-refresh").addEventListener("click", refresh);
-refresh();
-setInterval(refresh, REFRESH_MS);
+/* ===== smart auto-refresh =====
+   JMA publishes new 10-min obs at :00/:10/:20... plus ~90s of processing, so instead
+   of a blind 5-min timer we fetch ~100s after every 10-min boundary — fresh obs land
+   ~1.5 min after each print, every print. Plus: instant catch-up when the tab wakes
+   or the connection returns, an overlap guard, and a visible countdown. */
+const PUB_DELAY_MS = 100*1000, TEN_MIN = 600*1000;
+function nextWaitMs(now){
+  const phase = now % TEN_MIN;
+  let wait = (phase <= PUB_DELAY_MS) ? (PUB_DELAY_MS - phase) : (TEN_MIN - phase + PUB_DELAY_MS);
+  if(!isFinite(wait) || wait < 0 || wait > TEN_MIN + PUB_DELAY_MS) wait = 5*60*1000;
+  return wait;
+}
+let _fetching=false, _nextTimer=null, NEXT_AT=0;
+async function safeRefresh(){
+  if(_fetching) return;
+  _fetching=true;
+  try{ await refresh(); }
+  catch(e){}
+  finally{ _fetching=false; S.lastFetch=Date.now(); }
+}
+function scheduleNext(){
+  clearTimeout(_nextTimer);
+  const wait=nextWaitMs(Date.now());
+  NEXT_AT=Date.now()+wait;
+  _nextTimer=setTimeout(async()=>{ await safeRefresh(); scheduleNext(); }, wait);
+}
+function freshen(){
+  // waking a stale tab (or reconnecting): if data older than 2.5 min, fetch right now
+  if(Date.now() - (S.lastFetch||0) > 150*1000){ safeRefresh().then(scheduleNext); }
+}
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) freshen(); });
+window.addEventListener("focus", freshen);
+window.addEventListener("online", ()=>{ safeRefresh().then(scheduleNext); });
+document.getElementById("btn-refresh").addEventListener("click", ()=>{ safeRefresh().then(scheduleNext); });
+// countdown so the automation is visible
+setInterval(()=>{
+  const el=document.getElementById("auto-next"); if(!el) return;
+  if(_fetching){ el.textContent="refreshing now…"; return; }
+  const sLeft=Math.max(0, Math.round((NEXT_AT-Date.now())/1000));
+  el.textContent=`next update in ${Math.floor(sLeft/60)}:${p2(sLeft%60)}`;
+}, 1000);
+safeRefresh().then(scheduleNext);
 
 /* ================= PWA: register service worker ================= */
 /* Only registers over http(s) — silently skipped on file:// so local
