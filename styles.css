@@ -277,3 +277,10 @@ body{ background:transparent !important; background-image:none !important; }
 .solgrid>div{padding:12px 16px; border-top:1px solid rgba(128,140,160,.16); min-width:0; overflow:hidden}
 .solgrid .mid{white-space:nowrap; font-size:clamp(15px,1.6vw,21px)}
 .sol-note{font-family:var(--mono); font-size:12px; color:var(--ink-soft); padding:8px 16px 14px}
+
+/* pin drilldown tooltip */
+.sol-tip{position:absolute; z-index:6; max-width:360px; padding:10px 13px; border-radius:10px;
+  font-family:var(--mono); font-size:12px; line-height:1.6; color:var(--ink);
+  background:rgba(14,18,26,.94); border:1px solid rgba(128,140,160,.35);
+  box-shadow:0 10px 34px rgba(0,0,0,.45); pointer-events:none}
+:root:not([data-theme="dark"]) .sol-tip{background:rgba(250,251,249,.96); box-shadow:0 10px 30px rgba(30,40,60,.22)}

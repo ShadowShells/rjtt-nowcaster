@@ -1148,12 +1148,31 @@ function peakClimo(){
     const hist={}; a.forEach(h=>{hist[h]=(hist[h]||0)+1;});
     return {p25:q(.25), med:q(.5), p75:q(.75), hist, n:a.length};
   }
+  const hiDays={}, loDays={};
+  days.forEach(d=>{
+    if(d.hiH!=null) (hiDays[d.hiH]=hiDays[d.hiH]||[]).push(d);
+    if(d.loH!=null) (loDays[d.loH]=loDays[d.loH]||[]).push(d);
+  });
   return { hi:stats(days.map(d=>d.hiH).filter(h=>h!=null)),
            lo:stats(days.map(d=>d.loH).filter(h=>h!=null)),
+           hiDays, loDays,
            recent:days.slice(-5).filter(d=>d.date&&d.lo!=null) };
 }
 function _hm(min){ min=((min%1440)+1440)%1440; let h=Math.floor(min/60), m=Math.round(min%60); if(m===60){h=(h+1)%24;m=0;} return `${h}:${p2(m)}`; }
 function _dur(min){ return `${Math.floor(min/60)}h ${p2(Math.round(min%60))}m`; }
+const WDAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+function pinTipHTML(kind, h){
+  const cl=peakClimo(); if(!cl) return "";
+  const list=((kind==="hi"?cl.hiDays:cl.loDays)||{})[h]||[];
+  if(!list.length) return "";
+  const rows=list.slice().reverse().slice(0,10).map(d=>{
+    const wd=WDAYS[new Date(d.date+"T00:00:00Z").getUTCDay()];
+    const v=kind==="hi"?d.hi:d.lo;
+    return `${wd} ${d.date} · ${kind==="hi"?"high":"low"} ${fmt1(v)}° during ${p2(h)}:00`;
+  });
+  if(list.length>10) rows.push(`… +${list.length-10} more`);
+  return rows.join("<br>")+`<div style="margin-top:5px;opacity:.65">hourly reanalysis · tap elsewhere to close</div>`;
+}
 function renderSolar(nc){
   const svg=document.getElementById("sol-arc"); if(!svg) return;
   const sd=solarDay(Date.now()), sy=solarDay(Date.now()-864e5);
@@ -1169,10 +1188,10 @@ function renderSolar(nc){
     <line x1="${X((cl.hi.med+0.5)*60)}" y1="20" x2="${X((cl.hi.med+0.5)*60)}" y2="${HY}" stroke="rgba(231,181,60,.8)" stroke-dasharray="5 4" stroke-width="1.6"/>
     <text x="${X((cl.hi.med+0.5)*60)}" y="14" font-size="11" fill="rgba(231,181,60,.95)" text-anchor="middle" font-family="var(--mono)">typical high</text>`;
     for(const[h,n] of Object.entries(cl.hi.hist)){ if(n<2) continue; const cx=X((+h+0.5)*60);
-      g+=`<line x1="${cx}" y1="34" x2="${cx}" y2="46" stroke="rgba(231,181,60,.7)"/><circle cx="${cx}" cy="28" r="8" fill="rgba(231,181,60,.9)"/><text x="${cx}" y="31.5" font-size="10" font-weight="700" fill="#1a1206" text-anchor="middle" font-family="var(--mono)">${n}</text>`; } }
+      g+=`<g class="pin" data-kind="hi" data-h="${h}" style="cursor:pointer"><circle cx="${cx}" cy="30" r="15" fill="rgba(0,0,0,0)" pointer-events="all"/><line x1="${cx}" y1="34" x2="${cx}" y2="46" stroke="rgba(231,181,60,.7)"/><circle cx="${cx}" cy="28" r="8" fill="rgba(231,181,60,.9)"/><text x="${cx}" y="31.5" font-size="10" font-weight="700" fill="#1a1206" text-anchor="middle" font-family="var(--mono)">${n}</text></g>`; } }
   if(cl.lo){ g+=`<line x1="${X((cl.lo.med+0.5)*60)}" y1="${HY}" x2="${X((cl.lo.med+0.5)*60)}" y2="196" stroke="rgba(110,168,254,.7)" stroke-dasharray="5 4"/><text x="${X((cl.lo.med+0.5)*60)}" y="208" font-size="11" fill="rgba(110,168,254,.95)" text-anchor="middle" font-family="var(--mono)">typical low</text>`;
     for(const[h,n] of Object.entries(cl.lo.hist)){ if(n<2) continue; const cx=X((+h+0.5)*60);
-      g+=`<line x1="${cx}" y1="${HY+8}" x2="${cx}" y2="${HY+18}" stroke="rgba(110,168,254,.7)"/><circle cx="${cx}" cy="${HY+24}" r="8" fill="rgba(110,168,254,.9)"/><text x="${cx}" y="${HY+27.5}" font-size="10" font-weight="700" fill="#0d1016" text-anchor="middle" font-family="var(--mono)">${n}</text>`; } }
+      g+=`<g class="pin" data-kind="lo" data-h="${h}" style="cursor:pointer"><circle cx="${cx}" cy="${HY+22}" r="15" fill="rgba(0,0,0,0)" pointer-events="all"/><line x1="${cx}" y1="${HY+8}" x2="${cx}" y2="${HY+18}" stroke="rgba(110,168,254,.7)"/><circle cx="${cx}" cy="${HY+24}" r="8" fill="rgba(110,168,254,.9)"/><text x="${cx}" y="${HY+27.5}" font-size="10" font-weight="700" fill="#0d1016" text-anchor="middle" font-family="var(--mono)">${n}</text></g>`; } }
   // sun path + markers
   g+=`<polyline fill="none" stroke="var(--jma)" stroke-width="2.6" points="${pts.join(" ")}" opacity=".95"/>`;
   const mk=(m,lab)=>{ if(m==null) return ""; return `<line x1="${X(m)}" y1="20" x2="${X(m)}" y2="${HY}" stroke="rgba(128,140,160,.3)" stroke-dasharray="3 4"/><text x="${X(m)}" y="${HY+16}" font-size="11.5" fill="var(--ink)" text-anchor="middle" font-family="var(--mono)" font-weight="600">${lab} ${_hm(m)}</text>`; };
@@ -1185,6 +1204,29 @@ function renderSolar(nc){
     g+=`<text x="${xx}" y="213" font-size="10" fill="var(--ink-soft)" text-anchor="${anch}" font-family="var(--mono)">${h===0||h===24?"12a":h<12?h+"a":h===12?"12p":(h-12)+"p"}</text>`;
   }
   svg.innerHTML=g;
+  if(!svg._pinsWired){
+    svg._pinsWired=true;
+    svg.addEventListener("click",(e)=>{
+      const tip=document.getElementById("sol-tip"); if(!tip) return;
+      const pin=(e.target&&e.target.closest)?e.target.closest("g.pin"):null;
+      if(!pin){ tip.style.display="none"; return; }
+      const html=pinTipHTML(pin.getAttribute("data-kind"), +pin.getAttribute("data-h"));
+      if(!html){ tip.style.display="none"; return; }
+      tip.innerHTML=html;
+      const host=svg.parentElement, r=host.getBoundingClientRect();
+      tip.style.display="block";
+      let x=e.clientX-r.left+12, y=e.clientY-r.top+12;
+      const tw=tip.offsetWidth||280, th=tip.offsetHeight||80;
+      if(x+tw>r.width-6) x=Math.max(6, r.width-tw-6);
+      if(y+th>r.height-6) y=Math.max(6, (e.clientY-r.top)-th-12);
+      tip.style.left=x+"px"; tip.style.top=y+"px";
+      e.stopPropagation();
+    });
+    document.addEventListener("click",(e)=>{
+      const tip=document.getElementById("sol-tip");
+      if(tip && !(e.target&&e.target.closest&&e.target.closest("#sol-arc"))) tip.style.display="none";
+    });
+  }
   // status
   const stEl=document.getElementById("sol-status");
   if(stEl){
