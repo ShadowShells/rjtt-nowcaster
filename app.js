@@ -16,6 +16,7 @@ const MODELS = [
 const NEIGHBORS = [
   {id:"44132", name:"Tokyo · inland"},
   {id:"46106", name:"Yokohama · SW coast"},
+  {id:"45212", name:"Chiba · E bay"},
 ];
 const DIR_NAMES = ["CALM","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW","N"];
 const ONSHORE = new Set([4,5,6,7,8,9]);      // E–SSW: off Tokyo Bay into RJTT
@@ -292,8 +293,9 @@ async function fetchNeighbors(){
     const last = r.value[keys[keys.length-1]];
     const temp = last && last.temp ? last.temp[0] : null;
     const dir  = last && last.windDirection ? last.windDirection[0] : null;
+    const spd  = last && last.wind ? last.wind[0] : null;
     if(temp!=null && isFinite(temp))
-      S.neighbors[NEIGHBORS[i].id] = {name:NEIGHBORS[i].name, temp, dir,
+      S.neighbors[NEIGHBORS[i].id] = {name:NEIGHBORS[i].name, temp, dir, spd,
         t: parseInt(keys[keys.length-1].slice(8,10),10)+parseInt(keys[keys.length-1].slice(10,12),10)/60};
   });
   if(!Object.keys(S.neighbors).length) throw new Error("no neighbor data");
@@ -1306,6 +1308,38 @@ function renderSolar(nc){
     }
   }
 }
+/* ===== jump alerts: browser notification when the watch fires/escalates ===== */
+function notifyJump(j){
+  try{
+    const lvl = j ? j.level : 0;
+    const prev = window.__jl || 0;
+    window.__jl = lvl;
+    if(lvl <= prev) return;                              // ping only on escalation
+    if(!("Notification" in window) || Notification.permission!=="granted") return;
+    const body = lvl===2
+      ? `TEMP JUMPING: +${fmt1(j.d10)}° in 10 min — break underway`
+      : (j.sw && !j.windUp)
+        ? "Southerly switch inbound — bay sentinels flipped south; spike likely at Haneda"
+        : "Jump watch: south wind rising with model upside left";
+    new Notification("RJTT nowcaster ⚡", { body, tag:"rjtt-jump" });
+  }catch(e){}
+}
+function wireAlerts(){
+  try{
+    const b=document.getElementById("btn-alerts"); if(!b) return;
+    const paint=()=>{ b.textContent = ("Notification" in window)
+      ? (Notification.permission==="granted" ? "on ✓" : Notification.permission==="denied" ? "blocked" : "enable")
+      : "n/a"; };
+    paint();
+    b.addEventListener("click", async ()=>{
+      try{ if("Notification" in window && Notification.permission!=="granted") await Notification.requestPermission(); }catch(e){}
+      paint();
+      if(("Notification" in window) && Notification.permission==="granted")
+        try{ new Notification("RJTT nowcaster", {body:"Alerts armed — you'll get a ping when the jump watch fires.", tag:"rjtt-jump"}); }catch(e){}
+    });
+  }catch(e){}
+}
+wireAlerts();
 /* ===== jump watch: early warning that the temperature is about to break upward =====
    The July-1 pattern: obs plateau BELOW what the warmest credible model still expects,
    heating hours remain, and the south-sector wind is trending up (mixing strengthening).
@@ -1339,8 +1373,26 @@ function jumpRisk(obsMax, hiModel){
       const sSector = cur.dir!=null && cur.dir>=6 && cur.dir<=11;
       if(ref && sSector && cur.spd>=3 && (cur.spd-ref.spd)>=0.5) windUp=true;
     }
-    if(!windUp) return null;
-    return { level:1, headroom:+headroom.toFixed(1), d10:+d10.toFixed(1), windUp:true, accel:false };
+    // (c) southerly switch inbound: bay sentinels already flipped south (warm air behind)
+    // while Haneda hasn't — the front is crossing the bay toward the field.
+    let switchIn=false;
+    try{
+      const curW = w.length ? w[w.length-1] : null;
+      const hanedaSouth = curW && curW.dir!=null && curW.dir>=6 && curW.dir<=11 && (curW.spd||0)>=3;
+      if(!hanedaSouth){
+        let flipped=0, warmLead=false;
+        for(const id in (S.neighbors||{})){
+          const n=S.neighbors[id];
+          if(n && n.dir!=null && n.dir>=6 && n.dir<=11 && n.spd!=null && n.spd>=3){
+            flipped++;
+            if(S.cur!=null && n.temp!=null && (n.temp - S.cur) >= 0.5) warmLead=true;
+          }
+        }
+        if((flipped>=1 && warmLead) || flipped>=2) switchIn=true;
+      }
+    }catch(e){}
+    if(!windUp && !switchIn) return null;
+    return { level:1, headroom:+headroom.toFixed(1), d10:+d10.toFixed(1), windUp, sw:switchIn, accel:false };
   }catch(e){ return null; }
 }
 function computeNowcast(){
@@ -1705,8 +1757,11 @@ function render(nc){
     if(nc && nc.jump && vNote){
       vNote.textContent += nc.jump.level===2
         ? ` · ⚡ TEMP JUMPING: +${fmt1(nc.jump.d10)}° in the last 10 min${nc.jump.headroom>0?` with ${fmt1(nc.jump.headroom)}° of model upside`:" — past the warmest model"} — break underway`
-        : ` · ⚡ jump watch: south wind rising with ${fmt1(nc.jump.headroom)}° of warm-model upside left — upward break possible`;
-    }
+        : (nc.jump.sw && !nc.jump.windUp)
+          ? ` · ⚡ jump watch: SOUTHERLY SWITCH INBOUND — bay sentinels already south with ${fmt1(nc.jump.headroom)}° of warm-model upside — spike likely as it reaches Haneda`
+          : ` · ⚡ jump watch: south wind rising with ${fmt1(nc.jump.headroom)}° of warm-model upside left — upward break possible`;
+      notifyJump(nc.jump);
+    } else { try{ window.__jl = 0; }catch(e){} }
     // coherence check: does the verdict agree with the FOLLOW model?
     let followBk = null, followNm = null;
     if(bk && bk.buckets.length && vEl){
@@ -2262,6 +2317,27 @@ function freshen(){
 }
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) freshen(); });
 window.addEventListener("focus", freshen);
+
+/* ===== fast obs loop: pick up each new 10-min AMeDAS print within ~1 min =====
+   latest_time.txt is a tiny file; poll it every 60s and only refetch the
+   observation + sentinel data when a NEW print has actually landed. The heavy
+   stuff (models, sounding, archive) stays on the normal 5-min cycle. */
+let __lastObsStamp = null;
+async function fastObsTick(){
+  try{
+    if(_fetching) return;
+    const r = await fetch("https://www.jma.go.jp/bosai/amedas/data/latest_time.txt", {cache:"no-store"});
+    if(!r.ok) return;
+    const t = (await r.text()).trim();
+    if(t === __lastObsStamp) return;       // no new print yet
+    __lastObsStamp = t;
+    await Promise.allSettled([fetchAmedas(), fetchNeighbors()]);
+    render(computeNowcast());
+    const el=document.getElementById("m-updated");
+    if(el){ const j=jstParts(); el.textContent = `${p2(j.h)}:${p2(j.m)}:${p2(j.s)} JST`; }
+  }catch(e){}
+}
+setInterval(fastObsTick, 60*1000);
 window.addEventListener("online", ()=>{ safeRefresh().then(scheduleNext); });
 document.getElementById("btn-refresh").addEventListener("click", ()=>{ safeRefresh().then(scheduleNext); });
 // countdown so the automation is visible
