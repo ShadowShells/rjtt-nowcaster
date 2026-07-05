@@ -118,10 +118,15 @@ function summarize(rows, hourly){
     const d=temps[i].temp-temps[i-1].temp;
     if(d>=0.5 && (!jump||d>jump.d)) jump={d:+d.toFixed(1), hh:temps[i].hh, mm:temps[i].mm};
   }
-  const settled=Math.round(mx.temp);
-  const frac=mx.temp-Math.floor(mx.temp);
+  let px=null;
+  for(const r of temps){ if(r.mm===0||r.mm===30) px=(px==null)?r.temp:Math.max(px,r.temp); }
+  const base=(px!=null)?px:mx.temp;
+  const settled=Math.round(base);
+  const physRound=Math.round(mx.temp);
+  const spikeBetween = physRound!==settled;
+  const frac=base-Math.floor(base);
   const nearEdge=Math.abs(frac-0.5)<=0.15;
-  return {mx,mn,rain,pw,settled,nearEdge,jump};
+  return {mx,mn,rain,pw,settled,nearEdge,jump,spikeBetween,physRound};
 }
 
 async function loadAmedas(key, isToday){
@@ -190,7 +195,7 @@ function renderSummary(sum, iso){
   if(!sum){ el.innerHTML=`<div><div class="label">No data</div><div class="mid">—</div><div class="sub">nothing recorded for this date</div></div>`; return; }
   el.innerHTML=`
     <div><div class="label">Day max</div><div class="big accent">${fmt1(sum.mx.temp)}°C</div><div class="sub">at ${p2(sum.mx.hh)}:${p2(sum.mx.mm)} JST</div></div>
-    <div><div class="label">Settles (rounded)</div><div class="big">${sum.settled}°C</div><div class="sub">${sum.nearEdge?"⚠ near the rounding edge — confirm the prints":"clear of the edge"}</div></div>
+    <div><div class="label">Settles (prints)</div><div class="big">${sum.settled}°C</div><div class="sub">${sum.spikeBetween?`10-min max ${fmt1(sum.mx.temp)}° spiked between prints — prints likely ${sum.settled}°`:(sum.nearEdge?"⚠ near the rounding edge — confirm the prints":"clear of the edge")}</div></div>
     <div><div class="label">Day min</div><div class="mid">${fmt1(sum.mn.temp)}°C</div><div class="sub">at ${p2(sum.mn.hh)}:${p2(sum.mn.mm)}</div></div>
     <div><div class="label">Rain total</div><div class="mid">${fmt1(sum.rain)} mm</div><div class="sub">from 10-min buckets</div></div>
     <div><div class="label">Peak wind</div><div class="mid">${sum.pw?fmt1(sum.pw.spd)+" m/s":"—"}</div><div class="sub">${sum.pw?dir16(sum.pw.dir)+" at "+p2(sum.pw.hh)+":"+p2(sum.pw.mm):""}</div></div>
@@ -201,10 +206,11 @@ function renderSummary(sum, iso){
     const e=j[iso], line=document.getElementById("jr-line");
     if(e && e.lock){
       const graded=e.actual!=null;
-      const hit=graded && e.actual===e.lock.bucket;
+      const sVal=(e.actualS!=null)?e.actualS:e.actual;
+      const hit=graded && sVal===e.lock.bucket;
       line.style.display="block";
       line.textContent=`Your journal that day: locked ${e.lock.bucket}° at 10:30 JST`+
-        (graded?` · actual ${e.actual}° (${fmt1(e.actualX)}°) → ${hit?"HIT ✓":"MISS ✗"}`:" · not graded yet");
+        (graded?` · settled ${sVal}° (phys ${fmt1(e.actualX)}°) → ${hit?"HIT ✓":"MISS ✗"}`:" · not graded yet");
     } else line.style.display="none";
   }catch(e){}
 }

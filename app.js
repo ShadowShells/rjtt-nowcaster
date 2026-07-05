@@ -309,20 +309,25 @@ async function fetchYdayObs(){
       fetch(`https://www.jma.go.jp/bosai/amedas/data/point/${STATION}/${key}_${b}.json`, {cache:"no-store"})
         .then(r => r.ok ? r.json() : Promise.reject(r.status))
     ));
-    let mx = null;
+    let mx = null, px = null;
     for(const r of res){
       if(r.status!=="fulfilled") continue;
       for(const [ts,v] of Object.entries(r.value)){
         if(!ts.startsWith(key)) continue;
         const temp = v && v.temp ? v.temp[0] : null;
-        if(temp!=null && isFinite(temp)) mx = (mx==null)?temp:Math.max(mx,temp);
+        if(temp!=null && isFinite(temp)){
+          mx = (mx==null)?temp:Math.max(mx,temp);
+          const mm = ts.slice(10,12);
+          if(mm==="00"||mm==="30") px = (px==null)?temp:Math.max(px,temp);
+        }
       }
     }
-    return mx;
+    return {mx, px};
   }
   const [y, d2] = await Promise.all([dayMax(yesterdayKey()), dayMax(d2Key())]);
-  S.ydayObsMax = y; S.d2ObsMax = d2;
-  if(y==null && d2==null) throw new Error("no past obs");
+  S.ydayObsMax = y.mx; S.ydayObsProxy = y.px; S.ydayObsDate = yesterdayISO();
+  S.d2ObsMax = d2.mx; S.d2ObsDate = d2ISO();
+  if(y.mx==null && d2.mx==null) throw new Error("no past obs");
 }
 
 /* ===== per-model daily error log (feeds the 7d rank column) =====
@@ -346,7 +351,7 @@ function modelLogTick(){
     }
     const y=new Date(jst().getTime()-864e5);
     const yk=`${y.getUTCFullYear()}-${p2(y.getUTCMonth()+1)}-${p2(y.getUTCDate())}`;
-    if(j[yk] && j[yk].models && j[yk].actual==null && S.ydayObsMax!=null){ j[yk].actual=S.ydayObsMax; dirty=true; }
+    if(j[yk] && j[yk].models && j[yk].actual==null && S.ydayObsMax!=null && S.ydayObsDate===yk){ j[yk].actual=S.ydayObsMax; dirty=true; }
     const keys=Object.keys(j).sort();
     if(keys.length>30){ for(const kk of keys.slice(0,keys.length-30)) delete j[kk]; dirty=true; }
     if(dirty) mlogSave(j);
@@ -854,6 +859,51 @@ async function cloudSync(){
   const badge=document.getElementById("a-rec-note");
   if(badge && jrCloudOn()) badge.textContent += " · ☁ cloud-synced";
 }
+/* ===== grade repair: re-verify recent grades against the real per-date AMeDAS =====
+   Heals entries graded with a stale value (the midnight race) and backfills the
+   settlement proxy (max of :00/:30 readings — mirrors the half-hourly METAR prints). */
+async function repairGrades(){
+  try{
+    const today = todayISO();
+    if(localStorage.getItem("rjtt_regrade_d")===today) return;   // once per day
+    localStorage.setItem("rjtt_regrade_d", today);
+    const jr = journalLoad(); const ml = mlogLoad();
+    const dates = new Set();
+    [jr, ml].forEach(o=>{ Object.keys(o).forEach(k=>{ if(/^\d{4}-\d{2}-\d{2}$/.test(k) && k<today) dates.add(k); }); });
+    const recent = [...dates].sort().slice(-4);                  // AMeDAS keeps only recent days
+    let jDirty=false, mDirty=false;
+    for(const iso of recent){
+      const key = iso.split("-").join("");
+      const blocks=["00","03","06","09","12","15","18","21"];
+      const res = await Promise.allSettled(blocks.map(b=>
+        fetch(`https://www.jma.go.jp/bosai/amedas/data/point/${STATION}/${key}_${b}.json`,{cache:"no-store"})
+          .then(r=>r.ok?r.json():Promise.reject(r.status))));
+      let mx=null, px=null;
+      for(const r of res){
+        if(r.status!=="fulfilled") continue;
+        for(const [ts,v] of Object.entries(r.value)){
+          if(!ts.startsWith(key)) continue;
+          const t=v&&v.temp?v.temp[0]:null;
+          if(t==null||!isFinite(t)) continue;
+          mx=(mx==null)?t:Math.max(mx,t);
+          const mm=ts.slice(10,12);
+          if(mm==="00"||mm==="30") px=(px==null)?t:Math.max(px,t);
+        }
+      }
+      if(mx==null) continue;                                     // expired from AMeDAS
+      const sProx = Math.round(px!=null?px:mx);
+      const e=jr[iso];
+      if(e && e.lock){
+        if(e.actualX==null || Math.abs(e.actualX-mx)>=0.2){ e.actual=Math.round(mx); e.actualX=+mx.toFixed(1); jDirty=true; }
+        if(e.actualS!==sProx){ e.actualS=sProx; jDirty=true; }
+      }
+      const me=ml[iso];
+      if(me && me.models && (me.actual==null || Math.abs(me.actual-mx)>=0.2)){ me.actual=+mx.toFixed(1); mDirty=true; }
+    }
+    if(jDirty) journalSave(jr);
+    if(mDirty) mlogSave(ml);
+  }catch(e){}
+}
 /* ===== journal memory: learn from the dashboard's OWN graded days =====
    Every graded day carries an error (actual high - locked call). Weight past days
    by similarity to THIS morning (09:00 temp, 06->09 ramp, morning cloud, season),
@@ -924,14 +974,16 @@ function journalTick(bucket, high){
     dirty = true;
   }
   const yk = yesterdayISO();
-  if(S.ydayObsMax!=null && j[yk] && j[yk].lock && j[yk].actual==null){
+  if(S.ydayObsMax!=null && S.ydayObsDate===yk && j[yk] && j[yk].lock && j[yk].actual==null){
     j[yk].actual = Math.round(S.ydayObsMax); j[yk].actualX = S.ydayObsMax;
+    j[yk].actualS = (S.ydayObsProxy!=null) ? Math.round(S.ydayObsProxy) : Math.round(S.ydayObsMax);
+    const _tgt = j[yk].actualS;
     // when did the verdict FIRST lock onto the correct bucket and stay there?
     const c = j[yk].calls || [];
     let callT = null;
-    if(c.length && c[c.length-1].b === j[yk].actual){
+    if(c.length && c[c.length-1].b === _tgt){
       let i = c.length-1;
-      while(i>0 && c[i-1].b === j[yk].actual) i--;
+      while(i>0 && c[i-1].b === _tgt) i--;
       callT = c[i].t;
     }
     j[yk].callT = callT;   // null = never stably correct that day
@@ -947,7 +999,7 @@ function journalStats(j){
   let hit=0, mae=0;
   const callTs = [];
   for(const [,v] of rows){
-    if(v.lock.bucket===v.actual) hit++;
+    if(v.lock.bucket===((v.actualS!=null)?v.actualS:v.actual)) hit++;
     mae += Math.abs(v.lock.high-(v.actualX??v.actual));
     if(v.callT!=null) callTs.push(v.callT);
   }
@@ -2275,6 +2327,7 @@ async function refresh(){
   await Promise.allSettled([fetchSounding()]);
   await Promise.allSettled([fetchNeighbors(), fetchYdayObs(), fetchJmaForecast(), maybeFetchArchive()]);
   cloudSync();
+  repairGrades();
   setChip("chip-amedas", a.status==="fulfilled");
   setChip("chip-metar", m.status==="fulfilled");
   setChip("chip-models", o.status==="fulfilled");
