@@ -1328,12 +1328,12 @@ function renderSolar(nc){
   const stEl=document.getElementById("sol-status");
   if(stEl){
     let st="";
-    if(nowMin<sd.dawnMin||nowMin>sd.duskMin) st="night — radiative cooling only";
-    else if(nowMin<sd.riseMin) st="first light — cooling ending";
-    else if(cl.hi && nowMin>=cl.hi.p25*60 && nowMin<(cl.hi.p75+1)*60) st="⚑ PEAK WINDOW — highs usually print now";
-    else if(cl.hi && nowMin>=(cl.hi.p75+1)*60 && nowMin<=sd.setMin) st="↘ afternoon cooling — net loss exceeds incoming sun";
-    else if(nowMin<=sd.noonMin) st="heating phase — sun input exceeds losses";
-    else st="past solar noon — heating momentum fading";
+    if(nowMin<sd.dawnMin||nowMin>sd.duskMin) st="night · radiative cooling";
+    else if(nowMin<sd.riseMin) st="first light";
+    else if(cl.hi && nowMin>=cl.hi.p25*60 && nowMin<(cl.hi.p75+1)*60) st="⚑ PEAK WINDOW";
+    else if(cl.hi && nowMin>=(cl.hi.p75+1)*60 && nowMin<=sd.setMin) st="↘ afternoon cooling";
+    else if(nowMin<=sd.noonMin) st="heating phase";
+    else st="past noon · momentum fading";
     stEl.textContent=st;
   }
   // stats grid
@@ -1607,6 +1607,15 @@ function render(nc){
   if(window.__wxClassify) try{ window.__wxClassify(); }catch(e){}
   try{ renderSolar(nc); }catch(e){}
   try{ modelLogTick(); }catch(e){}
+  try{ Promise.resolve().then(()=>{
+    const _S = window.__SIG || [];
+    const tg=document.getElementById("fc-tags"), why=document.getElementById("fc-why"), wb=document.getElementById("fc-why-body");
+    if(tg) tg.innerHTML = _S.map(x=>`<span class="sig${x.hot?" hot":""}" title="${x.f.replace(/"/g,"&quot;")}">${x.t}</span>`).join("");
+    if(why && wb){
+      if(_S.length){ why.style.display="block"; wb.innerHTML = _S.map(x=>x.f).join("<br>"); }
+      else why.style.display="none";
+    }
+  }); }catch(e){}
 
   // readouts
   const elN = document.getElementById("r-nowcast");
@@ -1690,7 +1699,7 @@ function render(nc){
           : ``);
     } else if(S.obsMax!=null){
       fEl.textContent = `~${Math.round(S.obsMax)}°C`;
-      fNote.textContent = `estimated from AMeDAS ${fmt1(S.obsMax)}° (METAR feed blocked in this browser) — settlement itself uses METAR prints; confirm on Wunderground`;
+      fNote.textContent = `~AMeDAS ${fmt1(S.obsMax)}° · settlement = METAR prints — confirm on WU`;
     } else { fEl.textContent = "—"; fNote.textContent = "no observations yet today"; }
     const mi = jstParts().mi;
     const pf = printForecast(nc);
@@ -1735,6 +1744,8 @@ function render(nc){
     const bk = computeBuckets(nc);
     const vEl = document.getElementById("st-verdict");
     const vNote = document.getElementById("st-verdict-note");
+    const SIG=[]; const sig=(t,f,hot)=>{ try{ SIG.push({t, f:String(f||""), hot:!!hot}); }catch(e){} };
+    window.__SIG = SIG;
     const vLabel = document.getElementById("st-verdict-label");
     if(bk && bk.buckets.length && vEl){
       const sorted = [...bk.buckets].sort((a,b)=>b.p-a.p);
@@ -1794,17 +1805,22 @@ function render(nc){
     } else if(vEl){ vEl.textContent="—"; vNote.textContent="needs model data"; if(vLabel) vLabel.textContent="Most likely settlement"; }
     if(nc.evid && nc.evid.mixBreak && vEl){
       vNote.textContent += ` · ⚡ MIXING BREAK — ${nc.evid.reasons.filter(r=>r.includes("MIXING")||r.includes("advection")).join("; ")}. Morning cap broke; warm models BOOSTED, expect a fast climb — lean HIGH, not low`;
+      sig("⚡ mixing break","Morning cap broke — warm models boosted, expect a fast climb. Lean HIGH.",true);
     } else if(nc.evid && nc.evid.advect && nc.evid.trustWarm>1 && vEl){
       vNote.textContent += ` · strong onshore/SSW flow is HEATING not capping (warm advection) — warm models trusted, upside live`;
+      sig("advection ▲","Strong onshore/SSW flow is heating, not capping — warm upside live.",true);
     } else if(nc.evid && nc.evid.trustWarm < 1 && vEl && bk && bk.buckets.length){
       vNote.textContent += ` · ⚠ warm pace discounted to ${Math.round(nc.evid.trustWarm*100)}% — ${nc.evid.reasons.join("; ")} (cloud-trapped night heat rarely carries to the peak)`;
+      sig("⚠ pace ×"+Math.round(nc.evid.trustWarm*100)+"%", "Warm pace discounted: "+nc.evid.reasons.join("; "));
     }
     if(bk && bk.analogUsed!=null && S.analog && S.analog.n && vEl){
       vNote.textContent += ` · ${S.analog.n} analog days lean ${fmt1(bk.analogUsed)}° (25% weight in the verdict)`;
+      sig(S.analog.n+"d analog "+fmt1(bk.analogUsed)+"°", S.analog.n+" similar past mornings lean "+fmt1(bk.analogUsed)+"° — 25% of the verdict.");
     }
     if(nc && nc.memN && nc.memAdj!=null && vNote){
       const ranWord = nc.memMean > 0 ? "cold" : "warm";
       vNote.textContent += ` · memory: my calls ran ${fmt1(Math.abs(nc.memMean))}° ${ranWord} on ${nc.memN} graded day${nc.memN>1?"s":""} like this → ${nc.memAdj>0?"+":"-"}${fmt1(Math.abs(nc.memAdj))}° applied`;
+      sig((nc.memAdj>0?"+":"−")+fmt1(Math.abs(nc.memAdj))+"° memory","My calls ran "+fmt1(Math.abs(nc.memMean))+"° "+ranWord+" on "+nc.memN+" similar graded days — correction applied.");
     }
     if(nc && nc.jump && vNote){
       vNote.textContent += nc.jump.level===2
@@ -1812,6 +1828,9 @@ function render(nc){
         : (nc.jump.sw && !nc.jump.windUp)
           ? ` · ⚡ jump watch: SOUTHERLY SWITCH INBOUND — bay sentinels already south with ${fmt1(nc.jump.headroom)}° of warm-model upside — spike likely as it reaches Haneda`
           : ` · ⚡ jump watch: south wind rising with ${fmt1(nc.jump.headroom)}° of warm-model upside left — upward break possible`;
+      if(nc.jump.level===2) sig("⚡ JUMPING +"+fmt1(nc.jump.d10)+"°","Temp jumped +"+fmt1(nc.jump.d10)+"° in 10 min — break underway.",true);
+      else if(nc.jump.sw && !nc.jump.windUp) sig("⚡ switch inbound","Bay sentinels already blowing south — spike likely as the front reaches Haneda.",true);
+      else sig("⚡ jump watch","South wind rising with "+fmt1(nc.jump.headroom)+"° of warm-model upside left.",true);
       notifyJump(nc.jump);
     } else { try{ window.__jl = 0; }catch(e){} }
     // coherence check: does the verdict agree with the FOLLOW model?
@@ -1823,10 +1842,13 @@ function render(nc){
         const top = bk.__top || bk.buckets.reduce((a,b)=> b.p>a.p ? b : a);
         if(bk.__tossup && bk.__second && (followBk===top.k || followBk===bk.__second.k)){
           vNote.textContent += ` · FOLLOW model (${followNm}) breaks the tie toward ${followBk}°`;
+          sig("follow→"+followBk+"°","FOLLOW model ("+followNm+") breaks the near-tie toward "+followBk+"°.");
         } else if(followBk !== top.k){
           vNote.textContent += ` · ⚠ DIVERGENCE: FOLLOW model (${followNm}) implies ${followBk}° — the ${top.k}° verdict is the pace-lifted ensemble. If the warmth everyone missed was cloud (Sunshine card broken/overcast), favor ${followBk}°; if it’s clear-sky advection, favor ${top.k}°`;
+          sig("⚠ follow "+followBk+"°","FOLLOW model ("+followNm+") diverges: implies "+followBk+"° vs the "+top.k+"° verdict. Cloud-driven miss → favor "+followBk+"°; clear-sky advection → favor "+top.k+"°.");
         } else {
           vNote.textContent += ` · FOLLOW model (${followNm}) agrees with the verdict`;
+          sig("follow ✓","FOLLOW model ("+followNm+") agrees with the verdict.");
         }
       }
     }
@@ -1862,7 +1884,7 @@ function render(nc){
       // day is decided — final call is the settled high, no arbitration
       fcEl.textContent = `${bk.__settledK}°C`;
       fcEl.style.color = "var(--ink)";
-      fcNote.textContent = `day's high is in at ${fmt1(S.obsMax)}° → settles ${bk.__settledK}°; nothing left to arbitrate · confirm on Wunderground`;
+      fcNote.textContent = `high in at ${fmt1(S.obsMax)}° → settles ${bk.__settledK}° · confirm on WU`;
     } else if(fcEl && bk && bk.buckets.length){
       const top = bk.__top || bk.buckets.reduce((a,b)=> b.p>a.p ? b : a);
       const second = bk.__second, tossup = bk.__tossup;
@@ -1871,7 +1893,7 @@ function render(nc){
       if(cands.size <= 1){
         fcEl.textContent = `${top.k}°C`;
         fcEl.style.color = "var(--accent)";
-        fcNote.textContent = `${Math.round(top.p*100)}% — verdict, FOLLOW model and headline all agree; trade the number`;
+        fcNote.textContent = `${Math.round(top.p*100)}% — all three agree · trade it`;
       } else {
         const hot = Math.max(...cands), cool = Math.min(...cands);
         let hotV=0, coolV=0; const why=[];
@@ -1928,7 +1950,7 @@ function render(nc){
         let probCtx = "";
         if(bk.__tossup && bk.__second){
           const a=bk.__top, b=bk.__second;
-          probCtx = ` · resolved from a near-tie (${a.k}° ${Math.round(a.p*100)}% vs ${b.k}° ${Math.round(b.p*100)}%)`;
+          probCtx = ` · near-tie (${a.k}° ${Math.round(a.p*100)}% vs ${b.k}° ${Math.round(b.p*100)}%)`;
         } else {
           probCtx = ` · ${Math.round(top.p*100)}% in the ${top.k}° bucket`;
         }
@@ -2019,11 +2041,11 @@ function render(nc){
   const tom = MODELS.filter(m=>S.tomorrow[m.key]!=null)
     .map(m=>`${m.name} ${fmt1(S.tomorrow[m.key])}°`).join(" · ");
   const refBits = [];
-  if(S.cur!=null && S.curT!=null) refBits.push(`actual ${fmt1(S.cur)}°C @ ${hhmm(S.curT)} JST (AMeDAS)`);
-  if(S.jmaFx) refBits.push(`JMA official ${S.jmaFx.name} high: ${S.jmaFx.max}°C`);
-  if(S.ydayObsMax!=null) refBits.push(`yday actual: ${fmt1(S.ydayObsMax)}°C`);
-  if(tom) refBits.push(`Tomorrow raw maxes: ${tom}C`);
-  if(_sev.n) refBits.push(`7d rank: ${_sev.n} graded day${_sev.n>1?"s":""}`);
+  if(S.cur!=null && S.curT!=null) refBits.push(`obs ${fmt1(S.cur)}° @ ${hhmm(S.curT)}`);
+  if(S.jmaFx) refBits.push(`JMA ${S.jmaFx.name} ${S.jmaFx.max}°`);
+  if(S.ydayObsMax!=null) refBits.push(`yday ${fmt1(S.ydayObsMax)}°`);
+  if(tom) refBits.push(`tmrw: ${tom}`);
+  if(_sev.n) refBits.push(`7d: ${_sev.n} graded`);
   document.getElementById("tomorrow-line").textContent = refBits.join("  ·  ");
 
   // strategist read
@@ -2396,9 +2418,9 @@ document.getElementById("btn-refresh").addEventListener("click", ()=>{ safeRefre
 // countdown so the automation is visible
 setInterval(()=>{
   const el=document.getElementById("auto-next"); if(!el) return;
-  if(_fetching){ el.textContent="refreshing now…"; return; }
+  if(_fetching){ el.textContent="refreshing…"; return; }
   const sLeft=Math.max(0, Math.round((NEXT_AT-Date.now())/1000));
-  el.textContent=`next update in ${Math.floor(sLeft/60)}:${p2(sLeft%60)}`;
+  el.textContent=`next ${Math.floor(sLeft/60)}:${p2(sLeft%60)}`;
 }, 1000);
 safeRefresh().then(scheduleNext);
 

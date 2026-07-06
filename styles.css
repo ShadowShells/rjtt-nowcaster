@@ -284,3 +284,15 @@ body{ background:transparent !important; background-image:none !important; }
   background:rgba(14,18,26,.94); border:1px solid rgba(128,140,160,.35);
   box-shadow:0 10px 34px rgba(0,0,0,.45); pointer-events:none}
 :root:not([data-theme="dark"]) .sol-tip{background:rgba(250,251,249,.96); box-shadow:0 10px 30px rgba(30,40,60,.22)}
+
+/* ===== decluttered signal chips + why expander ===== */
+.sig{display:inline-block; font-family:var(--mono); font-size:11px; line-height:1;
+  padding:4px 9px; margin:7px 6px 0 0; border:1px solid rgba(128,140,160,.45);
+  border-radius:999px; color:var(--ink-soft); cursor:help; white-space:nowrap}
+.sig.hot{border-color:var(--accent); color:var(--accent)}
+#fc-why{margin-top:8px}
+#fc-why summary{font-family:var(--mono); font-size:10.5px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--ink-soft); cursor:pointer}
+#fc-why-body{margin-top:6px; line-height:1.65; font-size:12.5px}
+.meta .row{margin:3px 0}
+.sub{line-height:1.55}
