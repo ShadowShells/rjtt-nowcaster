@@ -43,7 +43,7 @@
   <p class="note" style="margin:10px 0"><a href="index.html" style="color:var(--jma);font-weight:600">← RJTT Nowcaster</a></p>
 
   <section class="panel">
-    <div class="panel-head"><h2>Past-day observations · AMeDAS 44166 羽田</h2></div>
+    <div class="panel-head"><h2 id="hist-head">Past-day observations</h2></div>
     <div class="hist-controls" style="padding:0 16px">
       <button class="navbtn" id="prevD" title="previous day">‹</button>
       <input type="date" id="pick">
@@ -63,7 +63,7 @@
     <div class="panel-head"><h2>All observations <span class="sub" id="res-note" style="font-weight:400"></span></h2></div>
     <div class="tbl-scroll">
       <table class="obs" id="obs">
-        <thead><tr><th>Time</th><th>Temp</th><th>Wind</th><th>Rain 10m</th><th>Humidity</th><th>Sun</th></tr></thead>
+        <thead><tr><th>Time</th><th>Temp</th><th>Wind</th><th>Rain</th><th>Humidity</th><th>Sun</th></tr></thead>
         <tbody id="obs-body"><tr><td colspan="6" class="sub" style="padding:18px">loading…</td></tr></tbody>
       </table>
     </div>
@@ -73,12 +73,30 @@
 
 <script>
 "use strict";
-const STATION="44166";
+/*__HREG__*/
+const STATIONS={
+  RJTT:{ key:"RJTT", ns:"rjtt", obs:"amedas", amedas:"44166", tz:"Asia/Tokyo", unit:"C",
+    head:"Past-day observations · AMeDAS 44166 羽田",
+    printMin:(m)=>(m===0||m===30),
+    wu:"https://www.wunderground.com/history/daily/jp/tokyo/RJTT" },
+  KMIA:{ key:"KMIA", ns:"kmia", obs:"nws", nws:"KMIA", iem:"MIA", tz:"America/New_York", unit:"F",
+    head:"Past-day observations · KMIA · ASOS / NWS",
+    printMin:(m)=>(m>=45),
+    wu:"https://www.wunderground.com/history/daily/us/fl/miami/KMIA" }
+};
+let CFG=STATIONS.RJTT;
+try{ CFG=STATIONS[localStorage.getItem("wx_station")]||STATIONS.RJTT; }catch(e){}
+const U=CFG.unit;
+const STATION=CFG.amedas||"";
+const _TZF=new Intl.DateTimeFormat("en-GB",{timeZone:CFG.tz,hour12:false,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"});
+function _tzp(ms){ const o={}; for(const p of _TZF.formatToParts(ms==null?Date.now():ms)) o[p.type]=p.value; return o; }
+function addDays(iso,n){ const d=new Date(iso+"T00:00:00Z"); d.setUTCDate(d.getUTCDate()+n); return `${d.getUTCFullYear()}-${p2(d.getUTCMonth()+1)}-${p2(d.getUTCDate())}`; }
+/*__HREG_END__*/
 const DIR16=["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
 const p2=n=>String(n).padStart(2,"0");
 const fmt1=v=>(Math.round(v*10)/10).toFixed(1);
 function jstNow(){ return new Date(Date.now()+9*3600*1000); }
-function jstTodayISO(){ const d=jstNow(); return `${d.getUTCFullYear()}-${p2(d.getUTCMonth()+1)}-${p2(d.getUTCDate())}`; }
+function jstTodayISO(){ const p=_tzp(); return `${p.year}-${p.month}-${p.day}`; }
 function dir16(idx){ if(idx==null) return "—"; if(idx===0) return "calm"; return DIR16[idx%16]; }
 function deg16(deg){ if(deg==null) return "—"; return DIR16[Math.round(deg/22.5)%16]; }
 
@@ -119,7 +137,7 @@ function summarize(rows, hourly){
     if(d>=0.5 && (!jump||d>jump.d)) jump={d:+d.toFixed(1), hh:temps[i].hh, mm:temps[i].mm};
   }
   let px=null;
-  for(const r of temps){ if(r.mm===0||r.mm===30) px=(px==null)?r.temp:Math.max(px,r.temp); }
+  for(const r of temps){ if(CFG.printMin(r.mm)) px=(px==null)?r.temp:Math.max(px,r.temp); }
   const base=(px!=null)?px:mx.temp;
   const settled=Math.round(base);
   const physRound=Math.round(mx.temp);
@@ -138,7 +156,7 @@ async function loadAmedas(key, isToday){
   return parseBlocks(res.filter(x=>x.status==="fulfilled").map(x=>x.value), key);
 }
 async function loadHourlyFallback(iso){
-  const u=`https://api.open-meteo.com/v1/forecast?latitude=35.5533&longitude=139.7811&hourly=temperature_2m,wind_speed_10m,wind_direction_10m,precipitation,relative_humidity_2m&start_date=${iso}&end_date=${iso}&timezone=Asia%2FTokyo&wind_speed_unit=ms`;
+  const u=`https://api.open-meteo.com/v1/forecast?latitude=35.5533&longitude=139.7811&hourly=temperature_2m,wind_speed_10m,wind_direction_10m,precipitation,relative_humidity_2m&start_date=${iso}&end_date=${iso}${U==="F"?"&temperature_unit=fahrenheit":""}&timezone=${encodeURIComponent(CFG.tz)}&wind_speed_unit=ms`;
   const r=await fetch(u,{cache:"no-store"}); if(!r.ok) throw 0;
   const j=await r.json(); const h=j.hourly||{};
   const rows=[];
@@ -194,15 +212,15 @@ function renderSummary(sum, iso){
   const el=document.getElementById("summary");
   if(!sum){ el.innerHTML=`<div><div class="label">No data</div><div class="mid">—</div><div class="sub">nothing recorded for this date</div></div>`; return; }
   el.innerHTML=`
-    <div><div class="label">Day max</div><div class="big accent">${fmt1(sum.mx.temp)}°C</div><div class="sub">at ${p2(sum.mx.hh)}:${p2(sum.mx.mm)} JST</div></div>
-    <div><div class="label">Settles (prints)</div><div class="big">${sum.settled}°C</div><div class="sub">${sum.spikeBetween?`10-min max ${fmt1(sum.mx.temp)}° spiked between prints — prints likely ${sum.settled}°`:(sum.nearEdge?"⚠ near the rounding edge — confirm the prints":"clear of the edge")}</div></div>
-    <div><div class="label">Day min</div><div class="mid">${fmt1(sum.mn.temp)}°C</div><div class="sub">at ${p2(sum.mn.hh)}:${p2(sum.mn.mm)}</div></div>
+    <div><div class="label">Day max</div><div class="big accent">${fmt1(sum.mx.temp)}°${U}</div><div class="sub">at ${p2(sum.mx.hh)}:${p2(sum.mx.mm)} JST</div></div>
+    <div><div class="label">Settles (prints)</div><div class="big">${sum.settled}°${U}</div><div class="sub">${sum.spikeBetween?`10-min max ${fmt1(sum.mx.temp)}° spiked between prints — prints likely ${sum.settled}°`:(sum.nearEdge?"⚠ near the rounding edge — confirm the prints":"clear of the edge")}</div></div>
+    <div><div class="label">Day min</div><div class="mid">${fmt1(sum.mn.temp)}°${U}</div><div class="sub">at ${p2(sum.mn.hh)}:${p2(sum.mn.mm)}</div></div>
     <div><div class="label">Rain total</div><div class="mid">${fmt1(sum.rain)} mm</div><div class="sub">from 10-min buckets</div></div>
     <div><div class="label">Peak wind</div><div class="mid">${sum.pw?fmt1(sum.pw.spd)+" m/s":"—"}</div><div class="sub">${sum.pw?dir16(sum.pw.dir)+" at "+p2(sum.pw.hh)+":"+p2(sum.pw.mm):""}</div></div>
     <div><div class="label">Fastest 10-min climb</div><div class="mid">${sum.jump?"⚡ +"+fmt1(sum.jump.d)+"°":"steady"}</div><div class="sub">${sum.jump?"at "+p2(sum.jump.hh)+":"+p2(sum.jump.mm)+" — jump day":"no 10-min step ≥ +0.5°"}</div></div>`;
   // journal cross-reference
   try{
-    const j=JSON.parse(localStorage.getItem("rjtt_jr_v1")||"{}");
+    const j=JSON.parse(localStorage.getItem(CFG.ns+"_jr_v1")||"{}");
     const e=j[iso], line=document.getElementById("jr-line");
     if(e && e.lock){
       const graded=e.actual!=null;
@@ -215,29 +233,107 @@ function renderSummary(sum, iso){
   }catch(e){}
 }
 
+/*__KPARSE__*/
+function _degIdx(deg){ if(deg==null) return null; const i=Math.round(deg/22.5)%16; return i===0?16:i; }
+function _uT(c){ return c==null?null:(U==="F"? c*9/5+32 : c); }
+function parseNWSFeatures(features, iso){
+  const rows=[];
+  for(const f of (features||[])){
+    const p=f&&f.properties; if(!p||!p.timestamp) continue;
+    const tp=_tzp(Date.parse(p.timestamp));
+    if(`${tp.year}-${tp.month}-${tp.day}`!==iso) continue;
+    const hh=(+tp.hour)%24, mm=+tp.minute;
+    let spd=(p.windSpeed&&p.windSpeed.value!=null)?p.windSpeed.value:null;
+    if(spd!=null && String(p.windSpeed.unitCode||"").indexOf("km_h")>=0) spd=spd/3.6;
+    rows.push({ t:hh+mm/60, hh, mm,
+      temp:(p.temperature&&p.temperature.value!=null)?+_uT(p.temperature.value).toFixed(1):null,
+      dir:_degIdx(p.windDirection&&p.windDirection.value), spd,
+      rain:null, hum:(p.relativeHumidity&&p.relativeHumidity.value!=null)?p.relativeHumidity.value:null, sun:null });
+  }
+  rows.sort((a,b)=>a.t-b.t);
+  return rows;
+}
+async function loadNWSDay(iso){
+  const s0=addDays(iso,-1), e0=addDays(iso,1);
+  const r=await fetch(`https://api.weather.gov/stations/${CFG.nws}/observations?start=${s0}T12:00:00Z&end=${e0}T12:00:00Z`,{cache:"no-store",headers:{accept:"application/geo+json"}});
+  if(!r.ok) throw 0;
+  return parseNWSFeatures((await r.json()).features, iso);
+}
+function parseIEMCsv(text, iso){
+  const lines=String(text||"").trim().split(/\r?\n/);
+  if(lines.length<2) return [];
+  const H=lines[0].split(",").map(x=>x.trim().toLowerCase());
+  const ix=n=>H.findIndex(h=>h.indexOf(n)>=0);
+  const iv=ix("valid"), it=ix("tmpf"), idd=ix("drct"), isk=ix("sknt");
+  if(iv<0||it<0) return [];
+  const out=[];
+  for(let i=1;i<lines.length;i++){
+    const c=lines[i].split(",");
+    if(c.length<=Math.max(iv,it)) continue;
+    const raw=c[iv].trim();
+    const ms=Date.parse(raw.indexOf("T")>=0?raw:(raw.replace(" ","T")+(raw.indexOf("Z")>=0?"":":00Z")));
+    if(!isFinite(ms)) continue;
+    const tp=_tzp(ms);
+    if(`${tp.year}-${tp.month}-${tp.day}`!==iso) continue;
+    const hh=(+tp.hour)%24, mm=+tp.minute;
+    const tf=parseFloat(c[it]); const t=isFinite(tf)?(U==="F"?tf:(tf-32)*5/9):null;
+    const dg=idd>=0?parseFloat(c[idd]):NaN; const sk=isk>=0?parseFloat(c[isk]):NaN;
+    out.push({ t:hh+mm/60, hh, mm, temp:t!=null?+t.toFixed(1):null,
+      dir:isFinite(dg)?_degIdx(dg):null, spd:isFinite(sk)?sk*0.5144:null, rain:null, hum:null, sun:null });
+  }
+  out.sort((a,b)=>a.t-b.t);
+  return out;
+}
+async function loadIEMDay(iso){
+  const e0=addDays(iso,1);
+  const url=`https://mesonet.agron.iastate.edu/cgi-bin/request/asos1min.py?station=${CFG.iem}&vars=tmpf&vars=drct&vars=sknt&sts=${iso}T00:00Z&ets=${e0}T06:00Z&sample=1min&what=download&tz=UTC&delim=comma&gis=no`;
+  const r=await fetch(url,{cache:"no-store"});
+  if(!r.ok) throw 0;
+  return parseIEMCsv(await r.text(), iso);
+}
+function thinWithMax(rows, mod){
+  const t=rows.filter(r=>r.temp!=null);
+  if(!t.length) return rows;
+  let mx=t[0]; for(const r of t) if(r.temp>mx.temp) mx=r;
+  const out=rows.filter(r=> (r.mm%mod===0) || r===mx );
+  return out;
+}
+/*__KPARSE_END__*/
 async function loadDay(iso){
   document.getElementById("obs-body").innerHTML=`<tr><td colspan="6" class="sub" style="padding:18px">loading ${iso}…</td></tr>`;
   document.getElementById("res-note").textContent="";
   const key=iso.replace(/-/g,"");
   const [y,m,d]=iso.split("-").map(Number);
-  document.getElementById("wulink").href=`https://www.wunderground.com/history/daily/jp/tokyo/RJTT/date/${y}-${m}-${d}`;
+  document.getElementById("wulink").href=`${CFG.wu}/date/${y}-${m}-${d}`;
   const isToday = iso===jstTodayISO();
-  let rows=[], hourly=false;
-  try{ rows=await loadAmedas(key, isToday); }catch(e){}
-  if(!rows.some(r=>r.temp!=null)){
-    try{ rows=await loadHourlyFallback(iso); hourly=true;
-      document.getElementById("res-note").textContent="· 10-min feed expired for this date — hourly model reanalysis shown";
-    }catch(e){ rows=[]; }
+  let rows=[], hourly=false, src="";
+  if(CFG.obs==="amedas"){
+    try{ rows=await loadAmedas(key, isToday); }catch(e){}
+    if(rows.some(r=>r.temp!=null)) src="· 10-minute AMeDAS observations";
   } else {
-    document.getElementById("res-note").textContent="· 10-minute AMeDAS observations";
+    if(iso >= addDays(jstTodayISO(), -6)){
+      try{ rows=await loadNWSDay(iso); }catch(e){}
+      if(rows.some(r=>r.temp!=null)) src="· NWS observations (METAR prints + specials)";
+    }
+    if(!rows.some(r=>r.temp!=null)){
+      try{ const rr=await loadIEMDay(iso); if(rr.some(r=>r.temp!=null)){ rows=rr; src="· 1-minute ASOS (IEM archive, 1–2 day lag)"; } }catch(e){}
+    }
   }
-  renderSummary(summarize(rows, hourly), iso);
+  if(!rows.some(r=>r.temp!=null)){
+    try{ rows=await loadHourlyFallback(iso); hourly=true; src="· station feed unavailable for this date — hourly model reanalysis shown"; }catch(e){ rows=[]; }
+  }
+  document.getElementById("res-note").textContent=src;
+  const sumRows = rows.length>200 ? thinWithMax(rows,10) : rows;
+  const tblRows = rows.length>400 ? thinWithMax(rows,5)  : rows;
+  renderSummary(summarize(sumRows, hourly), iso);
   drawChart(rows);
-  renderTable(rows, hourly);
+  renderTable(tblRows, hourly);
 }
 
 /* ---- wiring ---- */
 const pick=document.getElementById("pick");
+document.getElementById("hist-head").textContent=CFG.head;
+document.title=CFG.key+" · Past-day observations";
 pick.max=jstTodayISO(); pick.value=jstTodayISO();
 pick.addEventListener("change", ()=>{ if(pick.value) loadDay(pick.value); });
 function shift(days){

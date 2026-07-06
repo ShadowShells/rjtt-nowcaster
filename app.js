@@ -74,6 +74,10 @@ function jstParts(){
     if(UNIT==="F") document.querySelectorAll(".panel-head h2").forEach(el=>{ el.textContent = el.textContent.replace("°C","°F"); });
     const sel=document.getElementById("st-pick");
     if(sel){ sel.value=CFG.key; sel.addEventListener("change", ()=>{ try{ localStorage.setItem("wx_station", sel.value); }catch(e){} location.reload(); }); }
+    const ls=document.getElementById("lnk-src");
+    if(ls && CFG.key==="KMIA"){ ls.textContent="NWS obs ↗"; ls.href="https://forecast.weather.gov/data/obhistory/KMIA.html"; }
+    const lm=document.getElementById("lnk-map");
+    if(lm && CFG.key!=="RJTT") lm.style.display="none";
   }catch(e){}
 })();
 const p2 = n => String(n).padStart(2,"0");
