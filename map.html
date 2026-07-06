@@ -88,7 +88,7 @@ body{font-family:var(--mono); background:var(--paper); color:var(--ink); overflo
   <div class="title"><a href="index.html">← RJTT Nowcaster</a> · Tokyo Bay live map</div>
   <div class="spacer"></div>
   <span class="chip on" id="t-cloud"><span class="dot"></span>Cloud haze</span>
-  <span class="chip" id="t-sat"><span class="dot"></span>Satellite</span>
+  <span class="chip" id="t-sat"><span class="dot"></span>Satellite IR</span>
   <span class="chip" id="t-flow"><span class="dot"></span>Wind flow</span>
   <span class="chip on" id="t-radar"><span class="dot"></span>Rain radar</span>
   <span class="chip on" id="t-wind"><span class="dot"></span>Barbs</span>
@@ -133,10 +133,10 @@ const ONSHORE = new Set([4,5,6,7,8,9]); // E..SSW (16-pt index)
 const map = L.map("map", {zoomControl:true, attributionControl:false}).setView([35.62, 139.80], 10);
 
 // dedicated overlay pane for the weather canvases, sitting above tiles+markers
-map.createPane("satPane");
-map.getPane("satPane").style.zIndex = 250;
 map.createPane("radarPane");
 map.getPane("radarPane").style.zIndex = 300;
+map.createPane("satPane");
+map.getPane("satPane").style.zIndex = 260;
 // weather canvases live in a plain viewport-fixed overlay inside the map container —
 // no pane transforms to fight, so nothing can drift or sit in the wrong place.
 const _wxHost = document.createElement("div");
@@ -253,23 +253,50 @@ function drawBreeze(data){
 }
 
 // ---- JMA high-res precip nowcast overlay ----
-// ---- real satellite cloud layer (RainViewer infrared, web-tile XYZ) ----
-let satLayer=null, satTime=null;
-async function makeSat(){
-  // RainViewer publishes a manifest of recent frames; use the newest infrared satellite frame
-  try{
-    const r=await fetch("https://api.rainviewer.com/public/weather-maps.json",{cache:"no-store"});
-    if(!r.ok) throw 0;
-    const j=await r.json();
-    const ir = j.satellite && j.satellite.infrared;
-    if(!ir || !ir.length) throw 0;
-    const frame = ir[ir.length-1];
-    satTime = frame.time;
-    // tile scheme: {host}{path}/{size}/{z}/{x}/{y}/{color}/{options}.png
-    const url = `${j.host}${frame.path}/256/{z}/{x}/{y}/0/0_0.png`;
-    return L.tileLayer(url, {opacity:.8, minZoom:3, maxZoom:12, pane:"satPane", attribution:"Satellite © RainViewer"});
-  }catch(e){ return null; }
+/* ---- Himawari-9 clean-infrared cloud imagery via NASA GIBS (open tiles) ----
+   GIBS re-serves Himawari full-disk imagery every 10 min (~40 min latency) as
+   plain XYZ tiles - no key, no referer lock. We probe from ~40 min back and
+   step older in 10-min hops if a timestamp's tiles error out. */
+let satLayer=null, satOn=false, satStamp=null;
+function gibsTime(minAgo){
+  const pp=n=>String(n).padStart(2,"0");
+  const d=new Date(Date.now()-minAgo*60000);
+  const m=Math.floor(d.getUTCMinutes()/10)*10;
+  return d.getUTCFullYear()+"-"+pp(d.getUTCMonth()+1)+"-"+pp(d.getUTCDate())+"T"+pp(d.getUTCHours())+":"+pp(m)+":00Z";
 }
+function satUrl(t){
+  return "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/Himawari_AHI_Band13_Clean_Infrared/default/"+t+"/GoogleMapsCompatible_Level7/{z}/{y}/{x}.png";
+}
+function buildSat(idx){
+  const minsBack = 40 + idx*10;
+  if(minsBack > 130){
+    const f=document.getElementById("foot");
+    if(f && f.textContent.indexOf("satellite \u2717")<0) f.textContent+=" \u00b7 satellite \u2717";
+    return;
+  }
+  const t = gibsTime(minsBack);
+  const lyr = L.tileLayer(satUrl(t), {opacity:.55, maxZoom:14, maxNativeZoom:7, minZoom:3, pane:"satPane", attribution:"Himawari-9 \u00b7 NASA GIBS"});
+  let ok=0, err=0, settled=false;
+  lyr.on("tileload", ()=>{
+    if(settled){ ok++; return; }
+    settled=true; ok++; satStamp=t;
+    const f=document.getElementById("foot");
+    if(f && f.textContent.indexOf("satellite \u2713")<0) f.textContent+=" \u00b7 satellite \u2713 "+t.slice(11,16)+"Z";
+  });
+  lyr.on("tileerror", ()=>{
+    if(settled) return;
+    if(++err>=6 && !ok){
+      settled=true;
+      map.removeLayer(lyr);
+      if(satLayer===lyr) satLayer=null;
+      if(satOn) buildSat(idx+1);
+    }
+  });
+  if(satLayer) map.removeLayer(satLayer);
+  satLayer=lyr;
+  lyr.addTo(map);
+}
+setInterval(()=>{ if(satOn && gibsTime(40)!==satStamp) buildSat(0); }, 5*60*1000);
 
 let radarLayer=null;
 async function loadRadar(){
@@ -437,24 +464,10 @@ function wireToggle(id, on){
     el.classList.toggle("on");
     const active=el.classList.contains("on");
     if(id==="t-radar"){ if(radarLayer){ active?radarLayer.addTo(map):map.removeLayer(radarLayer);} }
+    if(id==="t-sat"){ satOn=active; if(active){ buildSat(0); } else if(satLayer){ map.removeLayer(satLayer); satLayer=null; } }
     if(id==="t-wind"){ layerWind=active; refresh(); }
     if(id==="t-breeze"){ layerBreeze=active; refresh(); }
     if(id==="t-cloud"){ cloudOn=active; drawCloud(); }
-    if(id==="t-sat"){
-      if(active){
-        el.querySelector(".dot").style.background="#E7B53C";
-        (async()=>{
-          if(!satLayer){ satLayer=await makeSat(); }
-          if(satLayer){ satLayer.addTo(map);
-            cloudOn=false; document.getElementById("t-cloud").classList.remove("on"); drawCloud();
-            const f=document.getElementById("foot"); if(f && satTime) f.textContent += ` · satellite ${new Date(satTime*1000).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`;
-          } else {
-            el.classList.remove("on");
-            alert("Live satellite imagery couldn't load right now — the model cloud haze stays available.");
-          }
-        })();
-      } else if(satLayer){ map.removeLayer(satLayer); }
-    }
     if(id==="t-flow"){ active?startFlow():stopFlow(); }
   });
 }
