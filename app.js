@@ -1360,6 +1360,27 @@ function renderSolar(nc){
     }
   }
 }
+/* ===== hourly strip: the blend's path through the coming hours ===== */
+function renderHourly(nc){
+  try{
+    const el=document.getElementById("hourly"); if(!el) return;
+    const t=jstParts(); const startH=Math.min(23, Math.floor(t.dec));
+    const keys=Object.keys(S.models||{}).filter(k=>Array.isArray(S.models[k]));
+    if(!keys.length){ el.innerHTML=""; return; }
+    const mean=h=>{ let sum=0,n=0; for(const k of keys){ const v=S.models[k][h]; if(v!=null&&isFinite(v)){sum+=v;n++;} } return n?sum/n:null; };
+    const cells=[]; let peakH=null, peakV=-1e9;
+    const endH=Math.min(23, Math.max(startH+7, 21));
+    for(let h=startH; h<=endH && cells.length<9; h++){
+      let v=(h===startH && S.cur!=null)?S.cur:mean(h);
+      if(v==null) continue;
+      if(v>peakV){ peakV=v; peakH=h; }
+      const c=(S.cloud&&S.cloud[h]!=null)?S.cloud[h]:null;
+      const ic=c==null?"\u00b7":(c<35?"\u2600":(c<70?"\u26c5":"\u2601"));
+      cells.push({h, v, ic, now:h===startH});
+    }
+    el.innerHTML=cells.map(c=>`<div class="hcell${c.now?" now":""}${c.h===peakH?" peak":""}"><div class="hh">${c.now?"Now":String(c.h).padStart(2,"0")+":00"}</div><div class="hi">${c.ic}</div><div class="hv">${Math.round(c.v)}\u00b0</div></div>`).join("");
+  }catch(e){}
+}
 /* ===== jump alerts: browser notification when the watch fires/escalates ===== */
 function notifyJump(j){
   try{
@@ -1607,6 +1628,7 @@ function render(nc){
   if(window.__wxClassify) try{ window.__wxClassify(); }catch(e){}
   try{ renderSolar(nc); }catch(e){}
   try{ modelLogTick(); }catch(e){}
+  try{ renderHourly(nc); }catch(e){}
   try{ Promise.resolve().then(()=>{
     const _S = window.__SIG || [];
     const tg=document.getElementById("fc-tags"), why=document.getElementById("fc-why"), wb=document.getElementById("fc-why-body");
@@ -1615,6 +1637,8 @@ function render(nc){
       if(_S.length){ why.style.display="block"; wb.innerHTML = _S.map(x=>x.f).join("<br>"); }
       else why.style.display="none";
     }
+    const hp=document.getElementById("hero-pill");
+    if(hp){ const hot=_S.find(x=>x.hot); if(hot){ hp.style.display="inline-flex"; hp.textContent=hot.t; } else hp.style.display="none"; }
   }); }catch(e){}
 
   // readouts
