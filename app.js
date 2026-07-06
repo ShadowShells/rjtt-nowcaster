@@ -1,7 +1,28 @@
 "use strict";
 /* ================= config ================= */
-const STATION = "44166";                       // AMeDAS Haneda
-const LAT = 35.5533, LON = 139.7811;           // RJTT
+/* ================= stations ================= */
+const STATIONS = {
+  RJTT: { key:"RJTT", ns:"rjtt", title:"RJTT Daily High Nowcaster — Tokyo Haneda",
+    h1:"RJTT · TOKYO HANEDA", jp:"東京国際空港 最高気温 実況予測",
+    lat:35.5533, lon:139.7811, tz:"Asia/Tokyo", tzLabel:"JST", unit:"C",
+    obs:"amedas", amedas:"44166",
+    evidence:true, jump:true, t850:true, jmaFx:true, neighbors:true,
+    printMin:(m)=>(m===0||m===30),
+    wu:"https://www.wunderground.com/history/daily/jp/tokyo/RJTT" },
+  KMIA: { key:"KMIA", ns:"kmia", title:"KMIA Daily High Nowcaster — Miami Intl",
+    h1:"KMIA · MIAMI INTL", jp:"",
+    lat:25.7959, lon:-80.2870, tz:"America/New_York", tzLabel:"ET", unit:"F",
+    obs:"nws", nws:"KMIA",
+    evidence:false, jump:false, t850:false, jmaFx:false, neighbors:false,
+    printMin:(m)=>(m>=45),
+    wu:"https://www.wunderground.com/history/daily/us/fl/miami/KMIA" }
+};
+let CFG = STATIONS.RJTT;
+try{ CFG = STATIONS[localStorage.getItem("wx_station")] || STATIONS.RJTT; }catch(e){}
+const UNIT = CFG.unit;
+const UNITQ = UNIT==="F" ? "&temperature_unit=fahrenheit" : "";
+const STATION = CFG.amedas || "";
+const LAT = CFG.lat, LON = CFG.lon;
 const MODELS = [
   {key:"jma_seamless",  name:"JMA",   color:"var(--jma)",   hex:"#2C6E8A"},
   {key:"ecmwf_ifs025",  name:"ECMWF", color:"var(--ecmwf)", hex:"#545E92"},
@@ -22,7 +43,7 @@ const DIR_NAMES = ["CALM","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","
 const ONSHORE = new Set([4,5,6,7,8,9]);      // E–SSW: off Tokyo Bay into RJTT
 const INLAND  = new Set([11,12,13,14,15,16]); // WSW–N: across the Tokyo metro (UHI)
 const BIAS_DECAY_H = 6;
-// Climatological normal daily-MAX temperature for Tokyo (°C), by month (Jan..Dec).
+// Climatological normal daily-MAX temperature for Tokyo (°${UNIT}), by month (Jan..Dec).
 // Standard Tokyo normals; used only as a seasonal sanity bound, interpolated by date.
 const NORMAL_MAX = [9.8,10.9,14.2,19.4,23.6,26.1,29.9,31.3,27.5,22.0,16.7,12.0];
 function normalHigh(){
@@ -36,15 +57,25 @@ function normalHigh(){
 const REFRESH_MS = 5*60*1000;
 
 /* ================= time helpers (JST) ================= */
-function jst(){ return new Date(Date.now() + 9*3600*1000); } // read with getUTC*
+const _TZF = new Intl.DateTimeFormat("en-GB",{timeZone:CFG.tz, hour12:false,
+  year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"});
+function _tzp(ms){ const o={}; for(const p of _TZF.formatToParts(ms==null?Date.now():ms)) o[p.type]=p.value; return o; }
+function jst(){ const p=_tzp(); return new Date(Date.UTC(+p.year, +p.month-1, +p.day, (+p.hour)%24, +p.minute, +p.second)); }
 function jstParts(){
-  const d = jst();
-  return {
-    y:d.getUTCFullYear(), mo:d.getUTCMonth()+1, da:d.getUTCDate(),
-    h:d.getUTCHours(), mi:d.getUTCMinutes(), s:d.getUTCSeconds(),
-    dec: d.getUTCHours() + d.getUTCMinutes()/60
-  };
+  const p=_tzp(); const h=(+p.hour)%24;
+  return { y:+p.year, mo:+p.month, da:+p.day, h, mi:+p.minute, s:+p.second, dec: h + (+p.minute)/60 };
 }
+/* apply station identity + wire the picker */
+(function applyStation(){
+  try{
+    document.title = CFG.title;
+    const h1=document.querySelector("h1");
+    if(h1) h1.innerHTML = CFG.h1 + (CFG.jp?` <span class="jp">${CFG.jp}</span>`:"");
+    if(UNIT==="F") document.querySelectorAll(".panel-head h2").forEach(el=>{ el.textContent = el.textContent.replace("°C","°F"); });
+    const sel=document.getElementById("st-pick");
+    if(sel){ sel.value=CFG.key; sel.addEventListener("change", ()=>{ try{ localStorage.setItem("wx_station", sel.value); }catch(e){} location.reload(); }); }
+  }catch(e){}
+})();
 const p2 = n => String(n).padStart(2,"0");
 function todayKey(){ const t=jstParts(); return `${t.y}${p2(t.mo)}${p2(t.da)}`; }
 function todayISO(){ const t=jstParts(); return `${t.y}-${p2(t.mo)}-${p2(t.da)}`; }
@@ -71,7 +102,63 @@ let S = { obs:[], obsMax:null, obsMaxT:null, cur:null, curT:null, winds:[], hum:
           neighbors:{}, ydayObsMax:null, ydayModelMax:{}, d2ObsMax:null, d2ModelMax:{}, jmaFx:null, fxRain:null, t850:null, t850Curves:{}, w850:null, hums:[], fxBreeze:null, sounding:null };
 
 /* ================= fetchers ================= */
+/* ===== NWS adapters (KMIA-class stations): api.weather.gov, CORS-open ===== */
+function _nwsU(c){ return c==null?null:(UNIT==="F"? c*9/5+32 : c); }
+function _deg16i(deg){ if(deg==null) return null; const i=Math.round(deg/22.5)%16; return i===0?16:i; }
+function _nwsRows(features){
+  const rows=[];
+  for(const f of (features||[])){
+    const p=f&&f.properties; if(!p||!p.timestamp) continue;
+    const tp=_tzp(Date.parse(p.timestamp));
+    const t=(p.temperature&&p.temperature.value!=null)?_nwsU(p.temperature.value):null;
+    let spd=(p.windSpeed&&p.windSpeed.value!=null)?p.windSpeed.value:null;
+    if(spd!=null && p.windSpeed.unitCode && String(p.windSpeed.unitCode).indexOf("km_h")>=0) spd=spd/3.6;
+    rows.push({ iso:`${tp.year}-${tp.month}-${tp.day}`, dec:((+tp.hour)%24)+(+tp.minute)/60, min:+tp.minute,
+      t, dir:_deg16i(p.windDirection&&p.windDirection.value), spd,
+      hum:(p.relativeHumidity&&p.relativeHumidity.value!=null)?p.relativeHumidity.value:null });
+  }
+  rows.sort((a,b)=> a.iso===b.iso ? a.dec-b.dec : (a.iso<b.iso?-1:1));
+  return rows;
+}
+async function fetchNWSObs(){
+  const r=await fetch(`https://api.weather.gov/stations/${CFG.nws}/observations?limit=80`,{cache:"no-store",headers:{accept:"application/geo+json"}});
+  if(!r.ok) throw new Error("nws "+r.status);
+  const rows=_nwsRows((await r.json()).features);
+  const today=todayISO();
+  const T=rows.filter(x=>x.iso===today);
+  S.obs=[]; S.winds=[]; S.hums=[]; S.suns=[]; S.rains=[];
+  for(const x of T){
+    if(x.t!=null) S.obs.push({t:x.dec, v:x.t});
+    if(x.spd!=null) S.winds.push({t:x.dec, dir:x.dir, spd:x.spd});
+    if(x.hum!=null) S.hums.push({t:x.dec, v:x.hum});
+  }
+  if(S.obs.length){
+    const last=S.obs[S.obs.length-1]; S.cur=last.v; S.curT=last.t;
+    let mx=S.obs[0]; for(const o of S.obs) if(o.v>mx.v) mx=o;
+    S.obsMax=mx.v; S.obsMaxT=mx.t;
+    const prints=T.filter(x=>x.t!=null&&CFG.printMin(x.min)).map(x=>x.t);
+    S.metarMax = prints.length ? Math.round(Math.max(...prints)) : Math.floor(S.obsMax);
+  }
+}
+async function fetchNWSYday(){
+  const r=await fetch(`https://api.weather.gov/stations/${CFG.nws}/observations?limit=250`,{cache:"no-store",headers:{accept:"application/geo+json"}});
+  if(!r.ok) throw new Error("nws yday "+r.status);
+  const rows=_nwsRows((await r.json()).features);
+  const y=yesterdayISO(), d2=d2ISO();
+  function dayStat(iso){
+    let mx=null, px=null;
+    for(const x of rows){ if(x.iso!==iso||x.t==null) continue;
+      mx=(mx==null)?x.t:Math.max(mx,x.t);
+      if(CFG.printMin(x.min)) px=(px==null)?x.t:Math.max(px,x.t); }
+    return {mx,px};
+  }
+  const a=dayStat(y), b=dayStat(d2);
+  S.ydayObsMax=a.mx; S.ydayObsProxy=a.px; S.ydayObsDate=y;
+  S.d2ObsMax=b.mx; S.d2ObsDate=d2;
+  if(a.mx==null && b.mx==null) throw new Error("no past obs");
+}
 async function fetchAmedas(){
+  if(CFG.obs==="nws") return fetchNWSObs();
   const head = await fetch("https://www.jma.go.jp/bosai/amedas/data/latest_time.txt", {cache:"no-store"});
   if(!head.ok) throw new Error("latest_time " + head.status);
   const t = jstParts();
@@ -167,7 +254,7 @@ async function fetchMetar(){
 }
 
 async function fetchModels(){
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}`
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}${UNITQ}`
     + `&hourly=temperature_2m,cloud_cover,precipitation,temperature_850hPa,wind_direction_10m,wind_direction_850hPa,wind_speed_850hPa&models=${MODELS.map(m=>m.key).join(",")}`
     + `&timezone=Asia%2FTokyo&forecast_days=2&past_days=2`;
   const r = await fetch(url, {cache:"no-store"});
@@ -278,6 +365,7 @@ async function fetchModels(){
 }
 
 async function fetchNeighbors(){
+  if(!CFG.neighbors) return;
   // latest 3-hour block for each neighbor station -> most recent temp + wind dir
   const t = jstParts();
   const block = p2(Math.floor(t.h/3)*3);
@@ -302,6 +390,7 @@ async function fetchNeighbors(){
 }
 
 async function fetchYdayObs(){
+  if(CFG.obs==="nws") return fetchNWSYday();
   // actual maxes at Haneda for the last two days, for model verification
   const blocks = ["00","03","06","09","12","15","18","21"];
   async function dayMax(key){
@@ -333,7 +422,7 @@ async function fetchYdayObs(){
 /* ===== per-model daily error log (feeds the 7d rank column) =====
    Between 10:15-16:00 JST the raw daily max each model shows for TODAY is locked;
    the next day it is graded against the AMeDAS actual. Last 30 days kept. */
-const MLOG_KEY="rjtt_mlog_v1";
+const MLOG_KEY=CFG.ns+"_mlog_v1";
 function mlogLoad(){ try{ return JSON.parse(localStorage.getItem(MLOG_KEY)||"{}"); }catch(e){ return {}; } }
 function mlogSave(j){ try{ localStorage.setItem(MLOG_KEY, JSON.stringify(j)); }catch(e){} }
 function modelLogTick(){
@@ -407,6 +496,7 @@ function computeSkill(){
 }
 
 async function fetchJmaForecast(){
+  if(!CFG.jmaFx) return;
   // JMA official public forecast for Tokyo-to (130000): forecaster-edited point temps
   const r = await fetch("https://www.jma.go.jp/bosai/forecast/data/forecast/130000.json", {cache:"no-store"});
   if(!r.ok) throw new Error("jma fx " + r.status);
@@ -431,7 +521,7 @@ async function fetchSounding(){
   const t=jstParts();
   const v=[];
   for(const L of LV){ v.push(`temperature_${L}hPa`,`relative_humidity_${L}hPa`,`wind_speed_${L}hPa`,`wind_direction_${L}hPa`,`geopotential_height_${L}hPa`); }
-  const url=`https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&hourly=${v.join(",")}&forecast_days=1&timezone=Asia%2FTokyo`;
+  const url=`https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&hourly=${v.join(",")}&forecast_days=1${UNITQ}&timezone=${encodeURIComponent(CFG.tz)}`;
   const r=await fetch(url,{cache:"no-store"}); if(!r.ok) throw new Error("sounding "+r.status);
   const j=await r.json(); const H=j.hourly||{}; const times=H.time||[];
   // pick the hour nearest 14:00 JST (afternoon mixing) but not before now
@@ -501,7 +591,7 @@ function analyzeLocal(){
       const switched = w.some(pp => pp.t<runStart && pp.dir!=null && pp.dir!==0 && !ONSHORE.has(pp.dir));
       L.seaTxt = `IN · since ${hhmm(runStart)}`;
       L.seaNote = (switched ? "switched from land flow; " : "")
-                + (L.drop!=null && L.drop>0.3 ? `−${L.drop.toFixed(1)}°C since onset; ` : "")
+                + (L.drop!=null && L.drop>0.3 ? `−${L.drop.toFixed(1)}°${UNIT} since onset; ` : "")
                 + (runStart < 13.5
                    ? "arrived BEFORE the ~14:00 peak → day's max is capped at the pre-onset level (typically 2–4° below inland)"
                    : "arrived after the peak → max already printed; this only speeds the evening cooldown");
@@ -588,7 +678,7 @@ function analyzeLocal(){
       if(old && oT!=null){ tdTrend = td - magnusTd(oT, old.v); }
     }
     L.dewTrend = tdTrend;
-    L.dewTxt = `${fmt1(td)}°C · Δ${fmt1(spread)}°`;
+    L.dewTxt = `${fmt1(td)}°${UNIT} · Δ${fmt1(spread)}°`;
     L.dewNote = (td>=21 ? `humid air mass (${src}) — solar energy goes to moisture, caps the max`
               : td<=12 ? `dry air mass (${src}) — efficient surface heating, upside if sunny`
               : `moderate moisture (${src}) — broadly neutral for the high`)
@@ -599,7 +689,7 @@ function analyzeLocal(){
   }
   if(S.taf){
     if(S.taf.tx!=null){
-      L.tafTxt = `${S.taf.tx}°C`;
+      L.tafTxt = `${S.taf.tx}°${UNIT}`;
       L.tafNote = `TX group, valid ${S.taf.txWhen} — forecaster-edited; weigh above raw global models`;
     } else { L.tafTxt = "no TX"; L.tafNote = "latest TAF carries no max-temp group"; }
   }
@@ -661,14 +751,14 @@ function dayOfYear(){
 }
 async function maybeFetchArchive(){
   try{
-    const cached = localStorage.getItem("rjtt_arc_v2");
+    const cached = localStorage.getItem((CFG.ns+"_arc_v2"));
     if(cached){ const o = JSON.parse(cached); if(o.fetched === todayISO() && o.days && o.days.length){ S.archive = o; return; } }
   }catch(e){}
   try{
     const end = yesterdayISO();
     const start = new Date(jst().getTime() - 730*864e5);
     const sIso = `${start.getUTCFullYear()}-${p2(start.getUTCMonth()+1)}-${p2(start.getUTCDate())}`;
-    const u = `https://archive-api.open-meteo.com/v1/archive?latitude=${LAT}&longitude=${LON}&start_date=${sIso}&end_date=${end}&hourly=temperature_2m,cloud_cover,wind_direction_10m&timezone=Asia%2FTokyo`;
+    const u = `https://archive-api.open-meteo.com/v1/archive?latitude=${LAT}&longitude=${LON}&start_date=${sIso}&end_date=${end}&hourly=temperature_2m,cloud_cover,wind_direction_10m${UNITQ}&timezone=${encodeURIComponent(CFG.tz)}`;
     const r = await fetch(u); if(!r.ok) throw new Error("archive "+r.status);
     const j = await r.json(); const H = j.hourly || {};
     const T = H.temperature_2m||[], C = H.cloud_cover||[], W = H.wind_direction_10m||[], times = H.time||[];
@@ -691,7 +781,7 @@ async function maybeFetchArchive(){
     }
     if(!days.length) throw new Error("empty archive");
     S.archive = {fetched: todayISO(), days};
-    try{ localStorage.setItem("rjtt_arc_v2", JSON.stringify(S.archive)); }catch(e){}
+    try{ localStorage.setItem((CFG.ns+"_arc_v2"), JSON.stringify(S.archive)); }catch(e){}
   }catch(e){ /* analog panel degrades gracefully */ }
 }
 function computeAnalogs(){
@@ -748,7 +838,7 @@ function printForecast(nc){
   if(pts.length < 2 && allObs.length >= 2) pts = allObs.slice(-4);
   // need at least 2 points and a current temp to project anything
   if(pts.length < 2 || S.cur==null) return null;
-  // least-squares trend over the recent window (°C per hour)
+  // least-squares trend over the recent window (°${UNIT} per hour)
   const n = pts.length;
   const mx = pts.reduce((a,p)=>a+p.t,0)/n, my = pts.reduce((a,p)=>a+p.v,0)/n;
   let num=0, den=0;
@@ -800,9 +890,9 @@ const JR_CLOUD = {
 };
 function jrCloudOn(){ return !!(JR_CLOUD.url && JR_CLOUD.key); }
 
-function journalLoad(){ try{ return JSON.parse(localStorage.getItem("rjtt_jr_v1")||"{}"); }catch(e){ return {}; } }
+function journalLoad(){ try{ return JSON.parse(localStorage.getItem((CFG.ns+"_jr_v1"))||"{}"); }catch(e){ return {}; } }
 function journalSave(j){
-  try{ localStorage.setItem("rjtt_jr_v1", JSON.stringify(j)); }catch(e){}
+  try{ localStorage.setItem((CFG.ns+"_jr_v1"), JSON.stringify(j)); }catch(e){}
   cloudPush(j);   // fire-and-forget background save to the cloud
 }
 
@@ -853,7 +943,7 @@ async function cloudSync(){
   if(!jrCloudOn()) return;
   const remote=await cloudPull(); if(!remote) { cloudPush(journalLoad()); return; }
   const merged=journalMerge(journalLoad(), remote);
-  try{ localStorage.setItem("rjtt_jr_v1", JSON.stringify(merged)); }catch(e){}
+  try{ localStorage.setItem((CFG.ns+"_jr_v1"), JSON.stringify(merged)); }catch(e){}
   cloudPush(merged);
   // refresh the panel if it's already rendered
   const badge=document.getElementById("a-rec-note");
@@ -865,8 +955,8 @@ async function cloudSync(){
 async function repairGrades(){
   try{
     const today = todayISO();
-    if(localStorage.getItem("rjtt_regrade_d")===today) return;   // once per day
-    localStorage.setItem("rjtt_regrade_d", today);
+    if(localStorage.getItem((CFG.ns+"_regrade_d"))===today) return;   // once per day
+    localStorage.setItem((CFG.ns+"_regrade_d"), today);
     const jr = journalLoad(); const ml = mlogLoad();
     const dates = new Set();
     [jr, ml].forEach(o=>{ Object.keys(o).forEach(k=>{ if(/^\d{4}-\d{2}-\d{2}$/.test(k) && k<today) dates.add(k); }); });
@@ -1015,6 +1105,7 @@ function journalStats(j){
 function morningEvidence(){
   const now = jstParts().dec;
   const E = {trustWarm:1, reasons:[], capScore:0, mixBreak:false, advect:false};
+  if(!CFG.evidence) return E;
   if(now < 5.5 || now > 14) return E;
   let cap = 0;
   const su = S.suns || [];
@@ -1054,7 +1145,7 @@ function morningEvidence(){
     }
   }
   // ===== MIXING-BREAK DETECTOR =====
-  // A capped-flat morning that suddenly ramps (>=1.5°C in ~30 min) with rising wind is a
+  // A capped-flat morning that suddenly ramps (>=1.5°${UNIT} in ~30 min) with rising wind is a
   // regime change: the cap broke. Un-discount HARD — the warm models are back in play.
   {
     const o = S.obs || [];
@@ -1125,7 +1216,7 @@ function computeStrategy(nc, loc){
     G.follow = nameOf(best[0]);
     const rk = nc.skill && nc.skill.ranks ? nc.skill.ranks[best[0]] : null;
     G.followKey = best[0]; G.followHigh = best[1].projHigh;
-    G.followNote = `pace ${(best[1].bias>=0?"+":"")}${fmt1(best[1].bias)}°${rk?`, rank #${rk}`:""} — tracking reality and verified; implies the ${Math.round(best[1].projHigh)}° bucket; cluster of ${core.length} clean models reads ${fmt1(Math.min(...core.map(([,p])=>p.projHigh)))}–${fmt1(Math.max(...core.map(([,p])=>p.projHigh)))}°C`;
+    G.followNote = `pace ${(best[1].bias>=0?"+":"")}${fmt1(best[1].bias)}°${rk?`, rank #${rk}`:""} — tracking reality and verified; implies the ${Math.round(best[1].projHigh)}° bucket; cluster of ${core.length} clean models reads ${fmt1(Math.min(...core.map(([,p])=>p.projHigh)))}–${fmt1(Math.max(...core.map(([,p])=>p.projHigh)))}°${UNIT}`;
   }
 
   // DISCARD
@@ -1422,6 +1513,7 @@ wireAlerts();
    a call flip. */
 function jumpRisk(obsMax, hiModel){
   try{
+    if(!CFG.jump) return null;
     const now = jstParts().dec;
     if(now < 10.5 || now > 14.75) return null;           // only while heating time remains
     const o = S.obs||[];
@@ -1643,13 +1735,13 @@ function render(nc){
 
   // readouts
   const elN = document.getElementById("r-nowcast");
-  elN.textContent = nc.high!=null ? `${fmt1(nc.high)}°C` : "—";
+  elN.textContent = nc.high!=null ? `${fmt1(nc.high)}°${UNIT}` : "—";
   const norm = normalHigh();
   document.getElementById("r-range").textContent =
     nc.high!=null
-      ? `range ${fmt1(nc.lo)}–${fmt1(nc.hi)}°C · normal ${fmt1(norm)}°C (${(nc.high-norm>=0?"+":"")}${fmt1(nc.high-norm)}° vs normal)`
+      ? `range ${fmt1(nc.lo)}–${fmt1(nc.hi)}°${UNIT} · normal ${fmt1(norm)}°${UNIT} (${(nc.high-norm>=0?"+":"")}${fmt1(nc.high-norm)}° vs normal)`
       : "model range —";
-  // range bar scaled to ±2°C around blend
+  // range bar scaled to ±2°${UNIT} around blend
   const bar = document.getElementById("r-rangebar"); bar.innerHTML="";
   if(nc.high!=null){
     const span=4, left=nc.high-2;
@@ -1661,7 +1753,7 @@ function render(nc){
   }
   document.getElementById("r-obsmax").textContent = S.obsMax!=null?`${fmt1(S.obsMax)}°C`:"—";
   document.getElementById("r-obsmax-time").textContent =
-    S.obsMaxT!=null ? `at ${hhmm(S.obsMaxT)} JST` + (S.metarMax!=null?` · METAR max ${fmt1(S.metarMax)}°C`:"") : "no observations yet";
+    S.obsMaxT!=null ? `at ${hhmm(S.obsMaxT)} JST` + (S.metarMax!=null?` · METAR max ${fmt1(S.metarMax)}°${UNIT}`:"") : "no observations yet";
   document.getElementById("r-current").textContent = S.cur!=null?`${fmt1(S.cur)}°C`:"—";
   document.getElementById("r-current-time").textContent = S.curT!=null?`obs ${hhmm(S.curT)} JST`:"—";
   document.getElementById("r-peak").textContent = nc.peakT!=null?hhmm(nc.peakT):"—";
@@ -1682,7 +1774,7 @@ function render(nc){
   const s850 = document.getElementById("s-t850");
   if(s850){
     if(S.t850){
-      s850.textContent = `${fmt1(S.t850.mean)}°C`;
+      s850.textContent = `${fmt1(S.t850.mean)}°${UNIT}`;
       const imLo = S.t850.mean + 9, imHi = S.t850.mean + 12;
       let adv = "";
       if(S.w850){
@@ -1716,13 +1808,13 @@ function render(nc){
     const fEl = document.getElementById("st-floor");
     const fNote = document.getElementById("st-floor-note");
     if(S.metarMax!=null){
-      fEl.textContent = `${Math.round(S.metarMax)}°C`;
+      fEl.textContent = `${Math.round(S.metarMax)}°${UNIT}`;
       fNote.textContent = `highest METAR print so far today` +
         (S.obsMax!=null && S.obsMax - Math.round(S.metarMax) >= 0.5
           ? ` · AMeDAS has touched ${fmt1(S.obsMax)}° — next METAR may print ${Math.round(S.obsMax)}°`
           : ``);
     } else if(S.obsMax!=null){
-      fEl.textContent = `~${Math.round(S.obsMax)}°C`;
+      fEl.textContent = `~${Math.round(S.obsMax)}°${UNIT}`;
       fNote.textContent = `~AMeDAS ${fmt1(S.obsMax)}° · settlement = METAR prints — confirm on WU`;
     } else { fEl.textContent = "—"; fNote.textContent = "no observations yet today"; }
     const mi = jstParts().mi;
@@ -1796,24 +1888,24 @@ function render(nc){
       if(decided){
         // day is over: settlement is simply the rounded observed high. No bucket arbitration.
         const settledK = Math.round(S.obsMax);
-        vEl.textContent = `${settledK}°C`;
+        vEl.textContent = `${settledK}°${UNIT}`;
         if(vLabel) vLabel.textContent = "Settlement (unofficial)";
         vNote.textContent = `day's high is in — ${fmt1(S.obsMax)}° at ${hhmm(S.obsMaxT)} JST, temp now falling → settles ${settledK}° · confirm the official print on Wunderground`;
         bk.__settledK = settledK;
       } else if(nc.peakSet && nearEdgeLive){
-        vEl.textContent = `${best.k}°C`;
+        vEl.textContent = `${best.k}°${UNIT}`;
         if(vLabel) vLabel.textContent = "Likely final";
         const conf = Math.round(best.p*100);
         vNote.textContent = `${fmt1(S.obsMax)}° sits just below the rounding edge and a late nudge could still tip it up — adjacent bucket live; watch the prints · ${conf}%`;
       } else if(nc.peakSet){
         // peak set, not near a climbable edge: round the observed high
         const settledK = Math.round(S.obsMax);
-        vEl.textContent = `${settledK}°C`;
+        vEl.textContent = `${settledK}°${UNIT}`;
         if(vLabel) vLabel.textContent = "Likely final";
         vNote.textContent = `peak has passed at ${fmt1(S.obsMax)}° (${hhmm(S.obsMaxT)} JST) → ${settledK}°; a late warm push before ~15:00 is the only upside`;
         bk.__settledK = settledK;
       } else {
-        vEl.textContent = `${best.k}°C`;
+        vEl.textContent = `${best.k}°${UNIT}`;
         const conf = Math.round(best.p*100);
         if(vLabel) vLabel.textContent = "Most likely settlement";
         const hrs = Math.max(0,(nc.peakT??14) - now2);
@@ -1906,7 +1998,7 @@ function render(nc){
     const fcEl = document.getElementById("fc-val"), fcNote = document.getElementById("fc-note");
     if(fcEl && bk && bk.__settledK!=null){
       // day is decided — final call is the settled high, no arbitration
-      fcEl.textContent = `${bk.__settledK}°C`;
+      fcEl.textContent = `${bk.__settledK}°${UNIT}`;
       fcEl.style.color = "var(--ink)";
       fcNote.textContent = `high in at ${fmt1(S.obsMax)}° → settles ${bk.__settledK}° · confirm on WU`;
     } else if(fcEl && bk && bk.buckets.length){
@@ -1915,7 +2007,7 @@ function render(nc){
       const headB = nc.high!=null ? Math.round(nc.high) : null;
       const cands = new Set([top && top.k, (tossup && second) ? second.k : null, followBk, headB].filter(v=>v!=null));
       if(cands.size <= 1){
-        fcEl.textContent = `${top.k}°C`;
+        fcEl.textContent = `${top.k}°${UNIT}`;
         fcEl.style.color = "var(--accent)";
         fcNote.textContent = `${Math.round(top.p*100)}% — all three agree · trade it`;
       } else {
@@ -1928,7 +2020,7 @@ function render(nc){
         if(loc.dewTrend!=null && loc.dewTrend<=-0.7){ hotV+=1; why.push("Td falling (drying)"); }
         else if(loc.dewTrend!=null && loc.dewTrend>=0.7){ coolV+=1; why.push("Td rising (moistening)"); }
         if(nc.evid && nc.evid.trustWarm<1){ coolV+=1; why.push("warm pace already discounted"); }
-        if(S.t850 && hot > S.t850.mean+12.3){ coolV+=2; why.push(`T850 ceiling ~${fmt1(S.t850.mean+12)}° vetoes ${hot}°`); }
+        if(CFG.t850 && S.t850 && hot > S.t850.mean+12.3){ coolV+=2; why.push(`T850 ceiling ~${fmt1(S.t850.mean+12)}° vetoes ${hot}°`); }
         if(loc.seaIn && !nc.peakSet){ coolV+=2; why.push("sea breeze already in"); }
         const su=S.suns||[];
         if(su.length>=4){
@@ -1968,7 +2060,7 @@ function render(nc){
           printNote = ` · ⚠ ${hot}° may never PRINT (printed-max est ${pm}°) — settlement gated to ${pm}°`;
           pick = pm; conf = "print-gated";
         }
-        fcEl.textContent = `${pick}°C`;
+        fcEl.textContent = `${pick}°${UNIT}`;
         fcEl.style.color = (conf==="split") ? "var(--ink)" : "var(--accent)";
         // probability context from the bucket distribution (folds in the old toss-up box)
         let probCtx = "";
@@ -2017,7 +2109,7 @@ function render(nc){
     const n = nb[i];
     if(!n){ el.textContent="—"; note.textContent="no data"; return; }
     const d = (S.cur!=null) ? n.temp - S.cur : null;
-    el.textContent = `${fmt1(n.temp)}°C${d!=null?` (${d>=0?"+":""}${fmt1(d)}°)`:""}`;
+    el.textContent = `${fmt1(n.temp)}°${UNIT}${d!=null?` (${d>=0?"+":""}${fmt1(d)}°)`:""}`;
     note.textContent = n.name + (d==null ? "" :
       d>=1.5 ? " — running warmer than Haneda" :
       d<=-1.5 ? " — running cooler than Haneda" : " — in line with Haneda");
@@ -2053,12 +2145,12 @@ function render(nc){
       <td class="model-name"><span class="pen" style="background:${m.hex}"></span>${m.name}</td>
       <td style="text-align:left"><b style="color:${rkColor}">${rk!=null?"#"+rk:"—"}</b></td>
       <td style="text-align:left"><b style="color:${r7&&r7<=2?"var(--ok)":"var(--ink-soft)"}">${r7?"#"+r7:"·"}</b></td>
-      <td>${fmt1(pm.rawMax)}°C</td>
+      <td>${fmt1(pm.rawMax)}°${UNIT}</td>
       <td>${peakH!=null?p2(peakH)+":00":"—"}</td>
-      <td>${fmt1(pm.modelNow)}°C</td>
+      <td>${fmt1(pm.modelNow)}°${UNIT}</td>
       <td><span style="color:${pm.bias==null?"inherit":pm.bias>=0.3?"var(--accent)":pm.bias<=-0.3?"var(--jma)":"inherit"};font-weight:${pm.bias!=null&&Math.abs(pm.bias)>=0.3?"600":"400"}">${pm.bias==null?"—":(pm.bias>=0?"+":"")+fmt1(pm.bias)}°</span></td>
       <td>${(S.ydayModelMax[m.key]!=null && S.ydayObsMax!=null) ? ((S.ydayModelMax[m.key]-S.ydayObsMax>=0?"+":"")+fmt1(S.ydayModelMax[m.key]-S.ydayObsMax)+"°") : "—"}</td>
-      <td class="proj">${fmt1(pm.projHigh)}°C</td>`
+      <td class="proj">${fmt1(pm.projHigh)}°${UNIT}</td>`
       : `<td class="model-name"><span class="pen" style="background:${m.hex}"></span>${m.name}</td><td colspan="8" style="color:var(--ink-soft)">unavailable</td>`;
     rows.appendChild(tr);
   }
@@ -2091,7 +2183,7 @@ function render(nc){
       set("a-high","—"); set("a-high-note","available from ~09:10 JST — needs this morning's 06→09 ramp");
       set("a-peak","—"); set("a-peak-note","—");
     } else if(a){
-      set("a-high",`${fmt1(a.high)}°C`);
+      set("a-high",`${fmt1(a.high)}°${UNIT}`);
       set("a-high-note",`median of ${a.n} similar mornings, IQR ${fmt1(a.lo)}–${fmt1(a.hiQ)}° — matched on 09:00 temp, ramp, cloud, flow, season (2 yrs reanalysis)`);
       set("a-peak", hhmm(a.peak));
       set("a-peak-note","median hour those days peaked");
@@ -2310,7 +2402,7 @@ function drawChart(nc){
   const Y = v => T + (ymax-v)/(ymax-ymin)*ph;
 
   let g = "";
-  // grid: every 3h vertical, every 2°C horizontal
+  // grid: every 3h vertical, every 2°${UNIT} horizontal
   for(let h=0;h<=24;h+=3){
     g += `<line x1="${X(h)}" y1="${T}" x2="${X(h)}" y2="${T+ph}" style="stroke:var(--grid);stroke-width:1"/>`;
     g += `<text x="${X(h)}" y="${H-12}" text-anchor="middle" font-size="11" style="fill:var(--ink-soft)">${p2(h%24)}</text>`;
@@ -2425,6 +2517,18 @@ let __lastObsStamp = null;
 async function fastObsTick(){
   try{
     if(_fetching) return;
+    if(CFG.obs==="nws"){
+      const rr=await fetch(`https://api.weather.gov/stations/${CFG.nws}/observations?limit=1`,{cache:"no-store",headers:{accept:"application/geo+json"}});
+      if(!rr.ok) return;
+      const ff=(await rr.json()).features; const ts=ff&&ff[0]&&ff[0].properties&&ff[0].properties.timestamp;
+      if(!ts || ts===__lastObsStamp) return;
+      __lastObsStamp=ts;
+      await Promise.allSettled([fetchNWSObs()]);
+      render(computeNowcast());
+      const el2=document.getElementById("m-updated");
+      if(el2){ const j2=jstParts(); el2.textContent=`${p2(j2.h)}:${p2(j2.mi)}:${p2(j2.s)} ${CFG.tzLabel}`; }
+      return;
+    }
     const r = await fetch("https://www.jma.go.jp/bosai/amedas/data/latest_time.txt", {cache:"no-store"});
     if(!r.ok) return;
     const t = (await r.text()).trim();
@@ -2433,7 +2537,7 @@ async function fastObsTick(){
     await Promise.allSettled([fetchAmedas(), fetchNeighbors()]);
     render(computeNowcast());
     const el=document.getElementById("m-updated");
-    if(el){ const j=jstParts(); el.textContent = `${p2(j.h)}:${p2(j.m)}:${p2(j.s)} JST`; }
+    if(el){ const j=jstParts(); el.textContent = `${p2(j.h)}:${p2(j.mi)}:${p2(j.s)} ${CFG.tzLabel}`; }
   }catch(e){}
 }
 setInterval(fastObsTick, 60*1000);
@@ -2477,7 +2581,7 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
 /* ================= journal export / import ================= */
 (function(){
   function dl(){
-    let data="{}"; try{ data=localStorage.getItem("rjtt_jr_v1")||"{}"; }catch(e){}
+    let data="{}"; try{ data=localStorage.getItem((CFG.ns+"_jr_v1"))||"{}"; }catch(e){}
     const blob=new Blob([data],{type:"application/json"});
     const a=document.createElement("a");
     a.href=URL.createObjectURL(blob);
@@ -2492,7 +2596,7 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
         const incoming=JSON.parse(r.result);
         if(typeof incoming!=="object"||Array.isArray(incoming)) throw new Error("bad file");
         // MERGE rather than overwrite: keep the most-complete record per day
-        let cur={}; try{ cur=JSON.parse(localStorage.getItem("rjtt_jr_v1")||"{}"); }catch(e){}
+        let cur={}; try{ cur=JSON.parse(localStorage.getItem((CFG.ns+"_jr_v1"))||"{}"); }catch(e){}
         let added=0;
         for(const k in incoming){
           const a=cur[k], b=incoming[k];
@@ -2505,7 +2609,7 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
             if(bn>an){ cur[k]=b; added++; }
           }
         }
-        localStorage.setItem("rjtt_jr_v1", JSON.stringify(cur));
+        localStorage.setItem((CFG.ns+"_jr_v1"), JSON.stringify(cur));
         const n=Object.keys(cur).length;
         alert(`Journal loaded — merged ${added} day(s), ${n} total now stored. Refreshing…`);
         location.reload();

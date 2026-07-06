@@ -331,3 +331,9 @@ button,.refresh,.theme,.skydemo,.chip,.sources .chip{border-radius:999px !import
 .hcell.now{background:var(--panel); border-color:rgba(128,140,160,.32); box-shadow:0 8px 20px rgba(0,0,0,.22); transform:translateY(-2px)}
 .hcell.peak .hv{color:var(--accent)}
 .hcell.peak .hh::after{content:" ⚑"; color:var(--accent)}
+
+/* station picker */
+.stpick{font-family:var(--sans); font-size:13px; font-weight:700; color:var(--ink);
+  background:rgba(128,140,160,.12); border:1px solid rgba(128,140,160,.3);
+  border-radius:999px; padding:5px 12px; cursor:pointer; -webkit-appearance:none; appearance:none}
+.stpick:focus{outline:2px solid var(--accent); outline-offset:1px}
