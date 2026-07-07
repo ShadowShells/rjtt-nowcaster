@@ -8,14 +8,18 @@ const STATIONS = {
     obs:"amedas", amedas:"44166",
     evidence:true, jump:true, t850:true, jmaFx:true, neighbors:true,
     printMin:(m)=>(m===0||m===30),
-    wu:"https://www.wunderground.com/history/daily/jp/tokyo/RJTT" },
+    wu:"https://www.wunderground.com/history/daily/jp/tokyo/RJTT",
+    wet:null, onshore:null, memDays:0, memHalf:0, stormDrop:0, capHint:0,
+    skillW:{past:0.6,today:0.4,days:2}, climoDays:30, decide:{drop:0.3,wait:1.5}, wetCeil:null },
   KMIA: { key:"KMIA", ns:"kmia", title:"KMIA Daily High Nowcaster — Miami Intl",
     h1:"KMIA · MIAMI INTL", jp:"",
     lat:25.7959, lon:-80.2870, tz:"America/New_York", tzLabel:"ET", unit:"F",
     obs:"nws", nws:"KMIA",
     evidence:false, jump:false, t850:false, jmaFx:false, neighbors:false,
     printMin:(m)=>(m>=45),
-    wu:"https://www.wunderground.com/history/daily/us/fl/miami/KMIA" }
+    wu:"https://www.wunderground.com/history/daily/us/fl/miami/KMIA",
+    wet:(mo)=>(mo>=5&&mo<=10), onshore:[4,5,6], memDays:10, memHalf:5, stormDrop:4, capHint:95,
+    skillW:{past:0.3,today:0.7,days:1}, climoDays:21, decide:{drop:1.0,wait:1.0}, wetCeil:{knee:94,k:0.35} }
 };
 let CFG = STATIONS.RJTT;
 try{ CFG = STATIONS[localStorage.getItem("wx_station")] || STATIONS.RJTT; }catch(e){}
@@ -482,7 +486,7 @@ function computeSkill(){
   for(const m of MODELS){
     const errs = [];
     if(S.ydayObsMax!=null && S.ydayModelMax[m.key]!=null) errs.push(Math.abs(S.ydayModelMax[m.key]-S.ydayObsMax));
-    if(S.d2ObsMax!=null && S.d2ModelMax[m.key]!=null) errs.push(Math.abs(S.d2ModelMax[m.key]-S.d2ObsMax));
+    if(CFG.skillW.days>=2 && S.d2ObsMax!=null && S.d2ModelMax[m.key]!=null) errs.push(Math.abs(S.d2ModelMax[m.key]-S.d2ObsMax));
     const maxErr = errs.length ? errs.reduce((a,b)=>a+b,0)/errs.length : null;
     let trackMAE = null;
     const T = S.models[m.key];
@@ -495,7 +499,7 @@ function computeSkill(){
       }
       if(n) trackMAE = sum/n;
     }
-    if(maxErr!=null && trackMAE!=null) scores[m.key] = 0.6*maxErr + 0.4*trackMAE;
+    if(maxErr!=null && trackMAE!=null) scores[m.key] = CFG.skillW.past*maxErr + CFG.skillW.today*trackMAE;
     else if(maxErr!=null) scores[m.key] = maxErr;
     else if(trackMAE!=null) scores[m.key] = trackMAE;
   }
@@ -1028,9 +1032,16 @@ function journalMemory(){
   let j; try{ j = journalLoad(); }catch(e){ return null; }
   const today = featSnapshot();
   const rows = [];
+  let cutSet=null;
+  if(CFG.memDays && CFG.memDays>0){
+    const gk=Object.keys(j).filter(k=>j[k]&&j[k].actualX!=null).sort();
+    cutSet=new Set(gk.slice(-CFG.memDays));
+  }
+  const nowIso = todayISO();
   for(const k in j){
     const e = j[k];
     if(!e || e.actualX==null || !e.lock || e.lock.high==null) continue;
+    if(cutSet && !cutSet.has(k)) continue;
     const err = e.actualX - e.lock.high;              // + means the call ran COLD (actual came in higher)
     if(!isFinite(err) || Math.abs(err) > 6) continue; // skip corrupted entries
     let w = 0.4;                                      // baseline: every graded day informs the global bias
@@ -1041,6 +1052,10 @@ function journalMemory(){
       if(e.feat.cloud!=null && today.cloud!=null) d += Math.abs(e.feat.cloud - today.cloud) / 25;
       if(e.feat.doy!=null && today.doy!=null){ let dd = Math.abs(e.feat.doy - today.doy); dd = Math.min(dd, 365-dd); d += Math.min(3, dd/20); }
       w = 1.6 / (1 + d);                              // similar mornings weigh more
+    }
+    if(CFG.memHalf && CFG.memHalf>0){
+      const age=Math.max(0,(Date.parse(nowIso)-Date.parse(k))/864e5);
+      w *= Math.pow(0.5, age/CFG.memHalf);            // fluid tropics: recent days dominate
     }
     rows.push({ err, w });
   }
@@ -1342,7 +1357,7 @@ function solarElev(sd, jstMin){
   return 90-_g(Math.acos(Math.max(-1,Math.min(1,cz))));
 }
 function peakClimo(){
-  const days=(S.archive&&S.archive.days)?S.archive.days.slice(-30):[];
+  const days=(S.archive&&S.archive.days)?S.archive.days.slice(-(CFG.climoDays||30)):[];
   function stats(a){
     if(a.length<10) return null;
     const st=[...a].sort((x,y)=>x-y), q=p=>st[Math.min(st.length-1,Math.round(p*(st.length-1)))];
@@ -1667,6 +1682,34 @@ function computeNowcast(){
     out.high = Math.max(out.high, Math.min(out.high + bump, out.hi));
     if(S.obsMax!=null && out.high < S.obsMax) out.high = S.obsMax;
   }
+  // wet-season ceiling: Miami's storm/cloud regime rarely lets highs run past the low-90s
+  if(CFG.wetCeil){
+    try{
+      const tk0=jstParts();
+      if(CFG.wet && CFG.wet(tk0.mo) && out.high > CFG.wetCeil.knee){
+        const ex = out.high - CFG.wetCeil.knee;
+        out.high = CFG.wetCeil.knee + ex*CFG.wetCeil.k;
+        out.wetCap = +(ex*(1-CFG.wetCeil.k)).toFixed(1);
+        if(S.obsMax!=null && out.high < S.obsMax) out.high = S.obsMax;
+      }
+    }catch(e){}
+  }
+  // KMIA wet-season situational awareness: sea breeze + storm collapse
+  if(CFG.key==="KMIA"){
+    try{
+      const tk=jstParts(); const wet = !!(CFG.wet && CFG.wet(tk.mo));
+      const wv=(S.winds||[]).filter(x=>x&&x.spd!=null);
+      const cw=wv.length?wv[wv.length-1]:null;
+      const breeze = !!(cw && cw.dir!=null && CFG.onshore && CFG.onshore.indexOf(cw.dir)>=0 && cw.spd>=3.5 && tk.dec>=10 && tk.dec<=17);
+      let collapse=false, drop=0;
+      if(wet && S.obsMax!=null && S.cur!=null && S.obsMaxT!=null){
+        drop=S.obsMax-S.cur;
+        if(tk.dec>=12.5 && drop>=CFG.stormDrop && (tk.dec-S.obsMaxT)<=3.5) collapse=true;
+      }
+      out.kmia={wet, breeze, collapse, drop:+drop.toFixed(1)};
+      if(collapse) out.high=S.obsMax;   // storm crash: wet-season days almost never recover — high is printed
+    }catch(e){}
+  }
   // peak timing
   let pk=-1e9, pt=null;
   for(let h=Math.floor(now); h<24; h++){
@@ -1888,10 +1931,10 @@ function render(nc){
       if(S.obsMax!=null && S.obsMaxT!=null){
         sinceHigh = now2 - S.obsMaxT;               // hours since the high was set
         const cur = (o.length? o[o.length-1].v : S.cur);
-        falling = (cur!=null && S.cur!=null && (S.obsMax - S.cur) >= 0.3);  // cooled >=0.3 off the high
+        falling = (cur!=null && S.cur!=null && (S.obsMax - S.cur) >= CFG.decide.drop);  // cooled off the high (station-scaled)
       }
       // a day is DECIDED when the peak is set AND (temp has fallen well off it, OR it's evening 18:00+)
-      const decided = nc.peakSet && (sinceHigh!=null && sinceHigh >= 1.5 && (falling || now2 >= 18));
+      const decided = (nc.kmia && nc.kmia.collapse) || (nc.peakSet && (sinceHigh!=null && sinceHigh >= CFG.decide.wait && (falling || now2 >= 18)));
       // rounding-edge risk only matters if the max could still CLIMB into the next bucket.
       // 23.3 rounds to 23; bucket 24 needs >=23.5, i.e. the temp must RISE. If decided/falling, it can't.
       const frac = (S.obsMax!=null) ? (S.obsMax - Math.floor(S.obsMax)) : null;   // .3 for 23.3
@@ -1903,7 +1946,7 @@ function render(nc){
         const settledK = Math.round(S.obsMax);
         vEl.textContent = `${settledK}°${UNIT}`;
         if(vLabel) vLabel.textContent = "Settlement (unofficial)";
-        vNote.textContent = `day's high is in — ${fmt1(S.obsMax)}° at ${hhmm(S.obsMaxT)} JST, temp now falling → settles ${settledK}° · confirm the official print on Wunderground`;
+        vNote.textContent = `${nc.kmia&&nc.kmia.collapse?"⛈ storm collapse — ":""}day's high is in — ${fmt1(S.obsMax)}° at ${hhmm(S.obsMaxT)} ${CFG.tzLabel}, temp now ${nc.kmia&&nc.kmia.collapse?"crashed":"falling"} → settles ${settledK}° · confirm the official print on Wunderground`;
         bk.__settledK = settledK;
       } else if(nc.peakSet && nearEdgeLive){
         vEl.textContent = `${best.k}°${UNIT}`;
@@ -1915,7 +1958,7 @@ function render(nc){
         const settledK = Math.round(S.obsMax);
         vEl.textContent = `${settledK}°${UNIT}`;
         if(vLabel) vLabel.textContent = "Likely final";
-        vNote.textContent = `peak has passed at ${fmt1(S.obsMax)}° (${hhmm(S.obsMaxT)} JST) → ${settledK}°; a late warm push before ~15:00 is the only upside`;
+        vNote.textContent = `peak has passed at ${fmt1(S.obsMax)}° (${hhmm(S.obsMaxT)} ${CFG.tzLabel}) → ${settledK}°; a late warm push before ~15:00 is the only upside`;
         bk.__settledK = settledK;
       } else {
         vEl.textContent = `${best.k}°${UNIT}`;
@@ -1962,6 +2005,14 @@ function render(nc){
       else sig("⚡ jump watch","South wind rising with "+fmt1(nc.jump.headroom)+"° of warm-model upside left.",true);
       notifyJump(nc.jump);
     } else { try{ window.__jl = 0; }catch(e){} }
+    if(nc && nc.kmia && vNote){
+      if(nc.kmia.collapse){
+        sig("⛈ storm collapse","Crashed "+fmt1(nc.kmia.drop)+"° off the high — wet-season Miami days almost never recover. Treating the high as printed.",true);
+      } else if(nc.kmia.breeze){
+        sig("sea breeze in","Onshore E–SE established — wet-season storm clock running; the high usually prints before the first cell.");
+      }
+      if(nc.wetCap) sig("wet ceiling −"+fmt1(nc.wetCap)+"°","Wet-season prior: storm/cloud cooling rarely lets Miami run past the low-90s — headline trimmed above "+(CFG.wetCeil?CFG.wetCeil.knee:94)+"°.");
+    }
     // coherence check: does the verdict agree with the FOLLOW model?
     let followBk = null, followNm = null;
     if(bk && bk.buckets.length && vEl){
@@ -2035,6 +2086,11 @@ function render(nc){
         if(nc.evid && nc.evid.trustWarm<1){ coolV+=1; why.push("warm pace already discounted"); }
         if(CFG.t850 && S.t850 && hot > S.t850.mean+12.3){ coolV+=2; why.push(`T850 ceiling ~${fmt1(S.t850.mean+12)}° vetoes ${hot}°`); }
         if(loc.seaIn && !nc.peakSet){ coolV+=2; why.push("sea breeze already in"); }
+        if(CFG.key==="KMIA" && nc.kmia && nc.kmia.wet && hot>=CFG.capHint){
+          const pmc=(S.cloud||[]).slice(12,18).filter(v=>v!=null);
+          const clAvg=pmc.length?pmc.reduce((a,b)=>a+b,0)/pmc.length:0;
+          if(clAvg>=55 || (S.fxRain||0)>=2){ coolV+=1; why.push(`wet-season storm regime questions ≥${CFG.capHint}°`); }
+        }
         const su=S.suns||[];
         if(su.length>=4){
           const last=su[su.length-1], rec=su.filter(x=>x.t>last.t-1);
