@@ -78,6 +78,12 @@ function jstParts(){
     if(ls && CFG.key==="KMIA"){ ls.textContent="NWS obs ↗"; ls.href="https://forecast.weather.gov/data/obhistory/KMIA.html"; }
     const lm=document.getElementById("lnk-map");
     if(lm && CFG.key!=="RJTT") lm.style.display="none";
+    if(CFG.key!=="RJTT"){
+      const ch=document.getElementById("chart-head");
+      if(ch) ch.textContent="Today · observations vs model guidance (ET)";
+      const lo=document.getElementById("lg-obs");
+      if(lo) lo.textContent="Observed (ASOS/NWS)";
+    }
   }catch(e){}
 })();
 const p2 = n => String(n).padStart(2,"0");
@@ -125,7 +131,8 @@ function _nwsRows(features){
   return rows;
 }
 async function fetchNWSObs(){
-  const r=await fetch(`https://api.weather.gov/stations/${CFG.nws}/observations?limit=80`,{cache:"no-store",headers:{accept:"application/geo+json"}});
+  const t0=new Date(Date.now()-36*3600*1000).toISOString().slice(0,19)+"Z";
+  const r=await fetch(`https://api.weather.gov/stations/${CFG.nws}/observations?start=${t0}`,{cache:"no-store",headers:{accept:"application/geo+json"}});
   if(!r.ok) throw new Error("nws "+r.status);
   const rows=_nwsRows((await r.json()).features);
   const today=todayISO();
@@ -145,7 +152,8 @@ async function fetchNWSObs(){
   }
 }
 async function fetchNWSYday(){
-  const r=await fetch(`https://api.weather.gov/stations/${CFG.nws}/observations?limit=250`,{cache:"no-store",headers:{accept:"application/geo+json"}});
+  const t1=new Date(Date.now()-64*3600*1000).toISOString().slice(0,19)+"Z";
+  const r=await fetch(`https://api.weather.gov/stations/${CFG.nws}/observations?start=${t1}`,{cache:"no-store",headers:{accept:"application/geo+json"}});
   if(!r.ok) throw new Error("nws yday "+r.status);
   const rows=_nwsRows((await r.json()).features);
   const y=yesterdayISO(), d2=d2ISO();
@@ -260,7 +268,7 @@ async function fetchMetar(){
 async function fetchModels(){
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}${UNITQ}`
     + `&hourly=temperature_2m,cloud_cover,precipitation,temperature_850hPa,wind_direction_10m,wind_direction_850hPa,wind_speed_850hPa&models=${MODELS.map(m=>m.key).join(",")}`
-    + `&timezone=Asia%2FTokyo&forecast_days=2&past_days=2`;
+    + `&timezone=${encodeURIComponent(CFG.tz)}&forecast_days=2&past_days=2`;
   const r = await fetch(url, {cache:"no-store"});
   if(!r.ok) throw new Error("open-meteo " + r.status);
   const j = await r.json();
@@ -1317,16 +1325,17 @@ function solarDay(ms){
   const phi=_r(LAT);
   function haFor(zen){ const c=Math.cos(_r(zen))/(Math.cos(phi)*Math.cos(decl))-Math.tan(phi)*Math.tan(decl); return (c<-1||c>1)?null:_g(Math.acos(c)); }
   const ha0=haFor(90.833), ha6=haFor(96);
-  const toJ=um=>um+540;
+  const offM=Math.round((jst().getTime()-Date.now())/60000);
+  const toJ=um=>um+offM;
   const noon=toJ(720-4*LON-eq);
-  const out={eq, decl, noonMin:noon, maxElev:90-Math.abs(LAT-_g(decl)),
+  const out={eq, decl, offM, noonMin:noon, maxElev:90-Math.abs(LAT-_g(decl)),
     riseMin:ha0!=null?toJ(720-4*(LON+ha0)-eq):null, setMin:ha0!=null?toJ(720-4*(LON-ha0)-eq):null,
     dawnMin:ha6!=null?toJ(720-4*(LON+ha6)-eq):null, duskMin:ha6!=null?toJ(720-4*(LON-ha6)-eq):null};
   out.dayLen=(out.riseMin!=null&&out.setMin!=null)?out.setMin-out.riseMin:0;
   return out;
 }
 function solarElev(sd, jstMin){
-  const tst=jstMin+sd.eq+4*LON-540;
+  const tst=jstMin+sd.eq+4*LON-sd.offM;
   const ha=_r(tst/4-180);
   const phi=_r(LAT);
   const cz=Math.sin(phi)*Math.sin(sd.decl)+Math.cos(phi)*Math.cos(sd.decl)*Math.cos(ha);
@@ -2455,7 +2464,7 @@ function drawChart(nc){
   }
   // now marker
   g += `<line x1="${X(now)}" y1="${T}" x2="${X(now)}" y2="${T+ph}" style="stroke:var(--ink);stroke-width:1.2;stroke-dasharray:4 4;opacity:0.6"/>`;
-  g += `<text x="${X(now)+5}" y="${T+14}" font-size="11" style="fill:var(--ink)">現在 ${hhmm(now)}</text>`;
+  g += `<text x="${X(now)+5}" y="${T+14}" font-size="11" style="fill:var(--ink)">${CFG.key==="RJTT"?"現在":"now"} ${hhmm(now)}</text>`;
 
   svg.innerHTML = g;
 }
