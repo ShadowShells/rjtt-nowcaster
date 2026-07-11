@@ -38,7 +38,7 @@
       <div class="hero-sub" id="hero-sub">live nowcast of today’s maximum</div>
     </div>
     <div class="hero-right">
-      <div class="hero-now"><span class="hn-val" id="hero-temp">—</span><span class="hn-unit">°C</span></div>
+      <div class="hero-now"><span class="hn-val" id="hero-temp">—</span><span class="hn-unit" id="hero-unit">°C</span></div>
       <div class="hero-stats">
         <div><span class="hs-k">HIGH</span><span class="hs-v" id="hero-high">—</span></div>
         <div><span class="hs-k">FLOOR</span><span class="hs-v" id="hero-floor">—</span></div>
@@ -319,12 +319,12 @@
   </section>
 
   <section class="panel">
-    <div class="panel-head"><h2>Latest RJTT METARs</h2></div>
+    <div class="panel-head"><h2 id="metar-head">Latest RJTT METARs</h2></div>
     <div class="ticker" id="metar-ticker">Loading…</div>
   </section>
 
   <p class="note" id="method">
-    Live nowcast of the Tokyo Haneda (RJTT) daily maximum: JMA AMeDAS 10-minute observations, RJTT METAR/TAF, and seven bias-corrected models, with sea-breeze, airmass, analog-day and print-level settlement logic.
+    <span id="foot-blurb">Live nowcast of the Tokyo Haneda (RJTT) daily maximum: JMA AMeDAS 10-minute observations, RJTT METAR/TAF, and seven bias-corrected models, with sea-breeze, airmass, analog-day and print-level settlement logic.</span>
     <a href="about.html" style="color:var(--jma);font-weight:600">How it works — full methodology & data sources ↗</a>
   </p>
 </div>

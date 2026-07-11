@@ -82,6 +82,19 @@ function jstParts(){
     if(ls && CFG.key==="KMIA"){ ls.textContent="NWS obs ↗"; ls.href="https://forecast.weather.gov/data/obhistory/KMIA.html"; }
     const lm=document.getElementById("lnk-map");
     if(lm && CFG.key!=="RJTT") lm.style.display="none";
+    try{ if(document.body && document.body.dataset) document.body.dataset.station=CFG.key; }catch(e){}
+    const hu=document.getElementById("hero-unit"); if(hu) hu.textContent="°"+UNIT;
+    const hk=document.getElementById("hero-kicker"); if(hk) hk.textContent=CFG.h1;
+    if(CFG.key!=="RJTT"){
+      const ca=document.getElementById("chip-amedas");
+      if(ca){ ca.href="https://forecast.weather.gov/data/obhistory/KMIA.html"; ca.innerHTML='<span class="dot"></span>NWS/ASOS obs ↗'; }
+      const cm=document.getElementById("chip-metar"); if(cm) cm.style.display="none";
+      const ct=document.getElementById("chip-taf"); if(ct) ct.style.display="none";
+      const mh=document.getElementById("metar-head");
+      if(mh){ try{ const sec=mh.parentElement.parentElement; if(sec&&sec.style) sec.style.display="none"; }catch(e){} }
+      const fb=document.getElementById("foot-blurb");
+      if(fb) fb.textContent="Live nowcast of the Miami Intl (KMIA) daily maximum: NWS/ASOS observations (whole-°C METAR encoder → °F ladder), eight bias-corrected models, wet-season storm-collapse and sea-breeze logic, and print-level settlement.";
+    }
     if(CFG.key!=="RJTT"){
       const ch=document.getElementById("chart-head");
       if(ch) ch.textContent="Today · observations vs model guidance (ET)";
@@ -236,6 +249,7 @@ async function fetchAmedas(){
 }
 
 async function fetchMetar(){
+  if(CFG.key!=="RJTT") return;
   const r = await fetch("https://aviationweather.gov/api/data/metar?ids=RJTT&format=json&hours=28", {cache:"no-store"});
   if(!r.ok) throw new Error("metar " + r.status);
   const arr = await r.json();
@@ -569,6 +583,7 @@ async function fetchSounding(){
 }
 
 async function fetchTaf(){
+  if(CFG.key!=="RJTT") return;
   const r = await fetch("https://aviationweather.gov/api/data/taf?ids=RJTT&format=json", {cache:"no-store"});
   if(!r.ok) throw new Error("taf " + r.status);
   const arr = await r.json();
@@ -1868,7 +1883,7 @@ function render(nc){
   try{ window.S = S; }catch(e){}
   const t = jstParts();
   document.getElementById("m-date").textContent = `${todayISO()}`;
-  document.getElementById("m-updated").textContent = `${hhmm(t.dec)}:${p2(t.s)} JST`;
+  document.getElementById("m-updated").textContent = `${hhmm(t.dec)}:${p2(t.s)} ${CFG.tzLabel}`;
   const thM = document.getElementById("th-modelnow");
   if(thM) thM.textContent = `Model @ ${hhmm(Math.min(t.dec,23.99))}`;
 
@@ -1909,9 +1924,9 @@ function render(nc){
   }
   document.getElementById("r-obsmax").textContent = S.obsMax!=null?`${fmt1(S.obsMax)}°C`:"—";
   document.getElementById("r-obsmax-time").textContent =
-    S.obsMaxT!=null ? `at ${hhmm(S.obsMaxT)} JST` + (S.metarMax!=null?` · METAR max ${fmt1(S.metarMax)}°${UNIT}`:"") : "no observations yet";
+    S.obsMaxT!=null ? `at ${hhmm(S.obsMaxT)} ${CFG.tzLabel}` + (S.metarMax!=null?` · METAR max ${fmt1(S.metarMax)}°${UNIT}`:"") : "no observations yet";
   document.getElementById("r-current").textContent = S.cur!=null?`${fmt1(S.cur)}°C`:"—";
-  document.getElementById("r-current-time").textContent = S.curT!=null?`obs ${hhmm(S.curT)} JST`:"—";
+  document.getElementById("r-current-time").textContent = S.curT!=null?`obs ${hhmm(S.curT)} ${CFG.tzLabel}`:"—";
   document.getElementById("r-peak").textContent = nc.peakT!=null?hhmm(nc.peakT):"—";
   const loc = analyzeLocal();
   document.getElementById("r-peak-note").textContent =
@@ -2386,7 +2401,7 @@ function render(nc){
       if(c && c.length){
         let i = c.length-1;
         while(i>0 && c[i-1].b === c[c.length-1].b) i--;
-        sinceTxt = ` · today: saying ${c[c.length-1].b}° since ${hhmm(c[i].t)} JST`;
+        sinceTxt = ` · today: saying ${c[c.length-1].b}° since ${hhmm(c[i].t)} ${CFG.tzLabel}`;
       }
     }
     if(st){
@@ -2804,7 +2819,7 @@ if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
 
 /* ================= live weather background ================= */
 (function(){
-  const bt=document.getElementById("build-tag"); if(bt) bt.textContent="v35";
+  const bt=document.getElementById("build-tag"); if(bt) bt.textContent="v56";
   try{ console.log("[rjtt] sky engine v35"); }catch(e){}
   const cv=document.getElementById("wx"); if(!cv) return;
   const ctx=cv.getContext("2d");
