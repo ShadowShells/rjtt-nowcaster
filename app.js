@@ -1694,6 +1694,37 @@ function computeNowcast(){
       }
     }catch(e){}
   }
+  // RJTT Tokyo-Bay coastal rules: bay-breeze cap, overcast residual, clear-day T850 target.
+  // Models/analogs/memory already price part of these — trims are residual and clamped.
+  if(CFG.key==="RJTT"){
+    try{
+      const tkR=jstParts();
+      const wv=(S.winds||[]).filter(x=>x&&x.dir!=null&&x.spd!=null).slice(-3);
+      const onshoreSteady = wv.length===3 && wv.every(x=>x.dir>=3&&x.dir<=5&&x.spd>=4);
+      const southerlyNow = wv.length && wv[wv.length-1].dir>=6 && wv[wv.length-1].dir<=11;
+      if(onshoreSteady && !southerlyNow && !out.jump && tkR.dec>=10 && tkR.dec<=15
+         && S.obsMax!=null && out.high>S.obsMax+0.5){
+        const climb=out.high-S.obsMax;
+        const kept=Math.max(0.5, climb*0.45);
+        out.bayCap=+(climb-kept).toFixed(1);
+        out.high=S.obsMax+kept;
+      }
+      let cl=0,cn=0; for(let h=10;h<=15;h++){ if(S.cloud&&S.cloud[h]!=null){cl+=S.cloud[h];cn++;} }
+      const clAvg=cn?cl/cn:null;
+      let sunDef=false;
+      if(tkR.dec>=11 && S.suns && S.suns.length){
+        const recent=S.suns.filter(x=>x.t>=10&&x.t<=Math.min(tkR.dec,15));
+        if(recent.length>=3){ const meanSun=recent.reduce((a,b)=>a+b.v,0)/recent.length; sunDef=(meanSun<=3); }
+      }
+      if(clAvg!=null && clAvg>=75 && sunDef && tkR.dec>=11 && tkR.dec<=16){
+        out.high-=0.6; out.cloudCut=0.6;
+        if(S.obsMax!=null && out.high<S.obsMax) out.high=S.obsMax;
+      }
+      if(CFG.t850 && S.t850 && clAvg!=null && clAvg<40){
+        out.t850Target=+(S.t850.mean+14.5).toFixed(1);
+      }
+    }catch(e){}
+  }
   // KMIA wet-season situational awareness: sea breeze + storm collapse
   if(CFG.key==="KMIA"){
     try{
@@ -2012,6 +2043,11 @@ function render(nc){
         sig("sea breeze in","Onshore E–SE established — wet-season storm clock running; the high usually prints before the first cell.");
       }
       if(nc.wetCap) sig("wet ceiling −"+fmt1(nc.wetCap)+"°","Wet-season prior: storm/cloud cooling rarely lets Miami run past the low-90s — headline trimmed above "+(CFG.wetCeil?CFG.wetCeil.knee:94)+"°.");
+    }
+    if(nc && CFG.key==="RJTT" && vNote){
+      if(nc.bayCap) sig("sea-breeze cap −"+fmt1(nc.bayCap)+"°","Steady E–ESE bay onshore through the heating hours — Tokyo Bay coastal rule trims the remaining climb.");
+      if(nc.cloudCut) sig("overcast −"+fmt1(nc.cloudCut)+"°","10–15h overcast with a realized sun deficit — residual solar discount beyond what the models already price.");
+      if(nc.t850Target) sig("T850 clear target ~"+fmt1(nc.t850Target)+"°","Clear-day thickness method: Haneda surface high ≈ 850 hPa + ~14.5°. The +12° ceiling veto still governs the hot tail.");
     }
     // coherence check: does the verdict agree with the FOLLOW model?
     let followBk = null, followNm = null;
