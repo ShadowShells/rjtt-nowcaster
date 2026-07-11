@@ -134,6 +134,17 @@ function _nwsRows(features){
   rows.sort((a,b)=> a.iso===b.iso ? a.dec-b.dec : (a.iso<b.iso?-1:1));
   return rows;
 }
+async function fetchPWS(){
+  try{
+    if(CFG.key!=="KMIA"){ return; }
+    const raw=localStorage.getItem(CFG.ns+"_pws"); if(!raw){ S.pws=null; return; }
+    const cfg=JSON.parse(raw); if(!cfg.id||!cfg.key){ S.pws=null; return; }
+    const r=await fetch(`https://api.weather.com/v2/pws/observations/current?stationId=${encodeURIComponent(cfg.id)}&format=json&units=e&apiKey=${encodeURIComponent(cfg.key)}`,{cache:"no-store"});
+    if(!r.ok){ S.pws=null; return; }
+    const j=await r.json(); const o=j&&j.observations&&j.observations[0];
+    if(o&&o.imperial&&o.imperial.temp!=null) S.pws={f:+o.imperial.temp, id:cfg.id, t:Date.now()};
+  }catch(e){ S.pws=null; }
+}
 async function fetchNWSObs(){
   const t0=new Date(Date.now()-36*3600*1000).toISOString().slice(0,19)+"Z";
   const r=await fetch(`https://api.weather.gov/stations/${CFG.nws}/observations?start=${t0}`,{cache:"no-store",headers:{accept:"application/geo+json"}});
@@ -1303,11 +1314,24 @@ function computeBuckets(nc){
     sigma = Math.max(0.15, Math.min(sigma, 0.32 - 0.04*since));
   }
   const floorK = (S.metarMax!=null) ? Math.round(S.metarMax) : null;
-  const lo = Math.floor(mean - 3.5*sigma), hi = Math.ceil(mean + 3.5*sigma);
-  const ks = [], ps = [];
-  for(let k=lo; k<=hi; k++){
-    ks.push(k);
-    ps.push(phi((k+0.5-mean)/sigma) - phi((k-0.5-mean)/sigma));
+  // KMIA-class stations: the sensor encodes WHOLE °C, then converts to °F.
+  // Printable values live on the 1.8°F ladder (…89.6, 91.4, 93.2…) — integers
+  // like 92/94 can never settle. Buckets are the ladder's true 1.8°-wide bands.
+  const ladder = (CFG.obs==="nws" && UNIT==="F");
+  const ks = [], ps = [], kf = {};
+  if(ladder){
+    const cLo=Math.floor((mean-3.5*sigma-32)/1.8), cHi=Math.ceil((mean+3.5*sigma-32)/1.8);
+    for(let c=cLo; c<=cHi; c++){
+      const fL=+(c*1.8+32).toFixed(1), k=Math.round(fL);
+      ks.push(k); kf[k]=fL;
+      ps.push(phi((fL+0.9-mean)/sigma) - phi((fL-0.9-mean)/sigma));
+    }
+  } else {
+    const lo = Math.floor(mean - 3.5*sigma), hi = Math.ceil(mean + 3.5*sigma);
+    for(let k=lo; k<=hi; k++){
+      ks.push(k);
+      ps.push(phi((k+0.5-mean)/sigma) - phi((k-0.5-mean)/sigma));
+    }
   }
   // settlement can't print below the METAR max already recorded:
   // collapse all mass below floorK into the floor bucket
@@ -1320,7 +1344,7 @@ function computeBuckets(nc){
   const total = ps.reduce((a,b)=>a+b,0) || 1;
   const out = ks.map((k,i)=>({k, p: ps[i]/total})).filter(b=>b.p>=0.01);
   out.sort((a,b)=>a.k-b.k);
-  return {buckets: out, sigma, floorK, analogUsed, center: mean};
+  return {buckets: out, sigma, floorK, analogUsed, center: mean, ladder, kf};
 }
 function interpHour(series, x){
   const lo = Math.floor(x), hi = Math.min(lo+1,23);
@@ -1741,6 +1765,51 @@ function computeNowcast(){
       if(collapse) out.high=S.obsMax;   // storm crash: wet-season days almost never recover — high is printed
     }catch(e){}
   }
+  // NEXT-PRINT PROJECTOR: what will the settlement instrument show at its next print?
+  // RJTT: AMeDAS 0.1° trace + slope → value at the next :00/:30, rounded to whole °C.
+  // KMIA: the METAR IS whole-°C — infer position inside the current step from dwell
+  // time and recent tick cadence (optionally anchored by a nearby PWS), then project
+  // the °C at the next ~:53 print and show its °F ladder value.
+  try{
+    const tp=jstParts(); out.printFx=null;
+    if(CFG.obs==="amedas"){
+      const o3=(S.obs||[]).filter(x=>x.t>=tp.dec-0.7);
+      if(o3.length>=3 && S.cur!=null){
+        const a=o3[0], b=o3[o3.length-1];
+        const slope=(b.t>a.t)?(b.v-a.v)/(b.t-a.t):0;
+        const tNext=(Math.floor(tp.dec*2)+1)/2;
+        const proj=S.cur+slope*Math.max(0,tNext-tp.dec);
+        const val=Math.round(proj);
+        const lastPrint=(()=>{ const pr=(S.obs||[]).filter(x=>CFG.printMin(Math.round((x.t%1)*60))); return pr.length?Math.round(pr[pr.length-1].v):null; })();
+        out.printFx={ label:`${p2(Math.floor(tNext))}:${p2(Math.round((tNext%1)*60))}`,
+          valTxt:`${val}°`, tick:(lastPrint!=null && val>lastPrint),
+          hover:`AMeDAS ${fmt1(S.cur)}° rising ${slope>=0?"+":""}${fmt1(slope)}°/h → ~${fmt1(proj)}° at the print → shows ${val}°.` };
+      }
+    } else if(CFG.obs==="nws"){
+      const rowsC=(S.obs||[]).map(x=>({t:x.t, c:Math.round((x.v-32)/1.8)}));
+      let ticks=[]; for(let i=1;i<rowsC.length;i++){ if(rowsC[i].c>rowsC[i-1].c) ticks.push({t:rowsC[i].t, c:rowsC[i].c}); }
+      const curC=rowsC.length?rowsC[rowsC.length-1].c:null;
+      if(curC!=null && ticks.length>=1 && tp.dec>=9 && tp.dec<=16){
+        const lastTick=ticks[ticks.length-1];
+        const dwell=Math.max(0, tp.dec-lastTick.t);
+        let cad=null;
+        if(ticks.length>=2){ const iv=[]; for(let i=1;i<ticks.length;i++) iv.push(ticks[i].t-ticks[i-1].t); cad=iv.slice(-3).reduce((a,b)=>a+b,0)/Math.min(3,iv.length); }
+        const cPerHr=cad?1/cad:0.8;
+        let cEst=Math.min(curC+0.45, (curC-0.5)+dwell*cPerHr);
+        let pwsUsed=false;
+        if(S.pws && (Date.now()-S.pws.t)<20*60*1000 && Math.abs(S.pws.f-(curC*1.8+32))<=2.7){
+          cEst=(S.pws.f-32)/1.8; pwsUsed=true;
+        }
+        const tNext=(tp.mi<53)?(tp.h+53/60):(tp.h+1+53/60);
+        const projC=cEst+cPerHr*Math.max(0,tNext-tp.dec);
+        const cNext=Math.round(Math.min(projC, curC+1.4));
+        const fL=+(cNext*1.8+32).toFixed(1);
+        out.printFx={ label:`${p2(Math.floor(tNext))}:53`,
+          valTxt:`${fL}°F`, tick:(cNext>curC),
+          hover:`Whole-°C encoder: at ${curC}°C for ${Math.round(dwell*60)}m, ticking ~${fmt1(cPerHr)}°C/h${pwsUsed?` · PWS ${S.pws.id} anchors ${fmt1(S.pws.f)}°F (${fmt1(cEst)}°C)`:` · est ${fmt1(cEst)}°C now`} → next print likely ${cNext}°C = ${fL}°F.` };
+      }
+    }
+  }catch(e){}
   // peak timing
   let pk=-1e9, pt=null;
   for(let h=Math.floor(now); h<24; h++){
@@ -2048,6 +2117,12 @@ function render(nc){
       if(nc.bayCap) sig("sea-breeze cap −"+fmt1(nc.bayCap)+"°","Steady E–ESE bay onshore through the heating hours — Tokyo Bay coastal rule trims the remaining climb.");
       if(nc.cloudCut) sig("overcast −"+fmt1(nc.cloudCut)+"°","10–15h overcast with a realized sun deficit — residual solar discount beyond what the models already price.");
       if(nc.t850Target) sig("T850 clear target ~"+fmt1(nc.t850Target)+"°","Clear-day thickness method: Haneda surface high ≈ 850 hPa + ~14.5°. The +12° ceiling veto still governs the hot tail.");
+    }
+    if(nc && nc.printFx && vNote){
+      sig((nc.printFx.tick?"⚡ ":"")+"next print → "+nc.printFx.valTxt+" @ "+nc.printFx.label, nc.printFx.hover, !!nc.printFx.tick);
+    }
+    if(CFG.key==="KMIA" && S.pws && (Date.now()-S.pws.t)<20*60*1000 && vNote){
+      sig("PWS "+fmt1(S.pws.f)+"°F","Nearby personal weather station ("+S.pws.id+") — the continuous thermometer between whole-°C METAR prints.");
     }
     // coherence check: does the verdict agree with the FOLLOW model?
     let followBk = null, followNm = null;
@@ -2566,7 +2641,7 @@ async function refresh(){
   document.getElementById("btn-refresh").disabled = true;
   S = { obs:[], obsMax:null, obsMaxT:null, cur:null, curT:null, winds:[], hum:null, metars:[], metarMax:null, dewp:null, metarWind:null, taf:null, suns:[], press:[], rains:[], cloud:null, models:{}, tomorrow:{}, ok:{}, neighbors:{}, ydayObsMax:null, ydayModelMax:{}, d2ObsMax:null, d2ModelMax:{}, jmaFx:null, fxRain:null, t850:null, t850Curves:{}, w850:null, hums:[], fxBreeze:null, sounding:null };
   try{ window.S = S; }catch(e){}
-  const [a, m, o, tf] = await Promise.allSettled([fetchAmedas(), fetchMetar(), fetchModels(), fetchTaf()]);
+  const [a, m, o, tf] = await Promise.allSettled([fetchAmedas(), fetchPWS(), fetchMetar(), fetchModels(), fetchTaf()]);
   await Promise.allSettled([fetchSounding()]);
   await Promise.allSettled([fetchNeighbors(), fetchYdayObs(), fetchJmaForecast(), maybeFetchArchive()]);
   cloudSync();
@@ -2628,7 +2703,7 @@ async function fastObsTick(){
       const ff=(await rr.json()).features; const ts=ff&&ff[0]&&ff[0].properties&&ff[0].properties.timestamp;
       if(!ts || ts===__lastObsStamp) return;
       __lastObsStamp=ts;
-      await Promise.allSettled([fetchNWSObs()]);
+      await Promise.allSettled([fetchNWSObs(), fetchPWS()]);
       render(computeNowcast());
       const el2=document.getElementById("m-updated");
       if(el2){ const j2=jstParts(); el2.textContent=`${p2(j2.h)}:${p2(j2.mi)}:${p2(j2.s)} ${CFG.tzLabel}`; }
