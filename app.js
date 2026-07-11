@@ -7,6 +7,7 @@ const STATIONS = {
     lat:35.5533, lon:139.7811, tz:"Asia/Tokyo", tzLabel:"JST", unit:"C",
     obs:"amedas", amedas:"44166",
     evidence:true, jump:true, t850:true, jmaFx:true, neighbors:true,
+    nbs:[{id:"44132",name:"Tokyo 44132 · inland"},{id:"46106",name:"Yokohama 46106 · SW coast"}], t850Mix:{lo:9,hi:12},
     printMin:(m)=>(m===0||m===30),
     wu:"https://www.wunderground.com/history/daily/jp/tokyo/RJTT",
     wet:null, onshore:null, memDays:0, memHalf:0, stormDrop:0, capHint:0,
@@ -15,7 +16,8 @@ const STATIONS = {
     h1:"KMIA · MIAMI INTL", jp:"",
     lat:25.7959, lon:-80.2870, tz:"America/New_York", tzLabel:"ET", unit:"F",
     obs:"nws", nws:"KMIA",
-    evidence:false, jump:false, t850:false, jmaFx:false, neighbors:false,
+    evidence:false, jump:false, t850:false, jmaFx:false, neighbors:true,
+    nbs:[{id:"KTMB",name:"Tamiami KTMB · SW inland"},{id:"KFLL",name:"Ft Lauderdale KFLL · N coast"}], t850Mix:{lo:8,hi:10},
     printMin:(m)=>(m>=45),
     wu:"https://www.wunderground.com/history/daily/us/fl/miami/KMIA",
     wet:(mo)=>(mo>=5&&mo<=10), onshore:[4,5,6], memDays:10, memHalf:5, stormDrop:4, capHint:95,
@@ -85,6 +87,10 @@ function jstParts(){
     try{ if(document.body && document.body.dataset) document.body.dataset.station=CFG.key; }catch(e){}
     const hu=document.getElementById("hero-unit"); if(hu) hu.textContent="°"+UNIT;
     const hk=document.getElementById("hero-kicker"); if(hk) hk.textContent=CFG.h1;
+    const tz8=document.getElementById("t850-tz"); if(tz8) tz8.textContent=CFG.tzLabel;
+    const n1l=document.getElementById("n-1-label"), n2l=document.getElementById("n-2-label");
+    if(n1l && CFG.nbs && CFG.nbs[0]) n1l.textContent=CFG.nbs[0].name;
+    if(n2l && CFG.nbs && CFG.nbs[1]) n2l.textContent=CFG.nbs[1].name;
     if(CFG.key!=="RJTT"){
       const ca=document.getElementById("chip-amedas");
       if(ca){ ca.href="https://forecast.weather.gov/data/obhistory/KMIA.html"; ca.innerHTML='<span class="dot"></span>NWS/ASOS obs ↗'; }
@@ -92,6 +98,10 @@ function jstParts(){
       const ct=document.getElementById("chip-taf"); if(ct) ct.style.display="none";
       const mh=document.getElementById("metar-head");
       if(mh){ try{ const sec=mh.parentElement.parentElement; if(sec&&sec.style) sec.style.display="none"; }catch(e){} }
+      const rh=document.getElementById("runway-head");
+      if(rh){ try{ const sec=rh.parentElement.parentElement; if(sec&&sec.style) sec.style.display="none"; }catch(e){} }
+      const sh=document.getElementById("spatial-head"); if(sh) sh.textContent="Spatial check · neighbor stations vs KMIA";
+      const sn=document.getElementById("snd-head"); if(sn) sn.textContent="Sounding · vertical profile over KMIA (model)";
       const fb=document.getElementById("foot-blurb");
       if(fb) fb.textContent="Live nowcast of the Miami Intl (KMIA) daily maximum: NWS/ASOS observations (whole-°C METAR encoder → °F ladder), eight bias-corrected models, wet-season storm-collapse and sea-breeze logic, and print-level settlement.";
     }
@@ -407,6 +417,25 @@ async function fetchModels(){
 
 async function fetchNeighbors(){
   if(!CFG.neighbors) return;
+  if(CFG.obs==="nws"){
+    const got={};
+    await Promise.allSettled((CFG.nbs||[]).map(async st=>{
+      const r=await fetch(`https://api.weather.gov/stations/${st.id}/observations?limit=6`,{cache:"no-store",headers:{accept:"application/geo+json"}});
+      if(!r.ok) return;
+      const rows=_nwsRows((await r.json()).features);
+      if(!rows.length) return;
+      const last=rows[rows.length-1];
+      let prev=null;
+      for(let i=rows.length-2;i>=0;i--){
+        const dt=(last.dec-rows[i].dec)+(last.iso!==rows[i].iso?24:0);
+        if(dt>=0.7&&dt<=1.6){ prev=rows[i]; break; }
+      }
+      if(last.t!=null) got[st.id]={name:st.name, temp:last.t, dir:last.dir, spd:last.spd, prevT:prev?prev.t:null};
+    }));
+    S.neighbors={};
+    for(const st of (CFG.nbs||[])) if(got[st.id]) S.neighbors[st.id]=got[st.id];
+    return;
+  }
   // latest 3-hour block for each neighbor station -> most recent temp + wind dir
   const t = jstParts();
   const block = p2(Math.floor(t.h/3)*3);
@@ -1776,7 +1805,9 @@ function computeNowcast(){
         drop=S.obsMax-S.cur;
         if(tk.dec>=12.5 && drop>=CFG.stormDrop && (tk.dec-S.obsMaxT)<=3.5) collapse=true;
       }
-      out.kmia={wet, breeze, collapse, drop:+drop.toFixed(1)};
+      const inl=S.neighbors&&S.neighbors["KTMB"];
+      const inCrash=!!(inl&&inl.prevT!=null&&(inl.prevT-inl.temp)>=4);
+      out.kmia={wet, breeze, collapse, inCrash, drop:+drop.toFixed(1)};
       if(collapse) out.high=S.obsMax;   // storm crash: wet-season days almost never recover — high is printed
     }catch(e){}
   }
@@ -2123,10 +2154,24 @@ function render(nc){
     if(nc && nc.kmia && vNote){
       if(nc.kmia.collapse){
         sig("⛈ storm collapse","Crashed "+fmt1(nc.kmia.drop)+"° off the high — wet-season Miami days almost never recover. Treating the high as printed.",true);
+      } else if(nc.kmia.inCrash){
+        sig("⛈ inland collapse","Tamiami dropped ≥4° in the last hour — outflow often reaches KMIA within the hour; treat late upside as gone.",true);
       } else if(nc.kmia.breeze){
         sig("sea breeze in","Onshore E–SE established — wet-season storm clock running; the high usually prints before the first cell.");
       }
       if(nc.wetCap) sig("wet ceiling −"+fmt1(nc.wetCap)+"°","Wet-season prior: storm/cloud cooling rarely lets Miami run past the low-90s — headline trimmed above "+(CFG.wetCeil?CFG.wetCeil.knee:94)+"°.");
+      try{
+        const inl=S.neighbors && S.neighbors["KTMB"];
+        const crash=(inl && inl.prevT!=null) ? (inl.prevT - inl.temp) : null;
+        if(crash!=null && crash>=4){
+          sig("⛈ inland collapse −"+fmt1(crash)+"°","Tamiami (KTMB) crashed "+fmt1(crash)+"° in the last hour — storm outflow often reaches KMIA next. Pre-position: the high may be about to print.",true);
+          const il=Math.round(crash);
+          if((window.__il||0)<il && ("Notification" in window) && Notification.permission==="granted"){
+            try{ new Notification("KMIA ⛈ inland collapse",{body:"KTMB crashed "+fmt1(crash)+"° — outflow toward KMIA. High may be printing.",tag:"kmia-inland"}); }catch(e){}
+          }
+          window.__il=il;
+        } else { window.__il=0; }
+      }catch(e){}
     }
     if(nc && CFG.key==="RJTT" && vNote){
       if(nc.bayCap) sig("sea-breeze cap −"+fmt1(nc.bayCap)+"°","Steady E–ESE bay onshore through the heating hours — Tokyo Bay coastal rule trims the remaining climb.");
@@ -2287,6 +2332,7 @@ function render(nc){
   }
 
   document.getElementById("o-flow").textContent = loc.flowTxt;
+  if(CFG.key==="RJTT"){
   document.getElementById("o-flow-note").textContent = loc.flowNote;
   document.getElementById("o-shift").textContent = loc.shiftTxt;
   document.getElementById("o-shift-note").textContent = loc.shiftNote;
@@ -2294,6 +2340,7 @@ function render(nc){
   oTurb.textContent = loc.turbTxt;
   oTurb.style.color = (loc.turbTxt==="TURB RISK"||loc.turbTxt==="WS / TURB") ? "var(--accent)" : "var(--ink)";
   document.getElementById("o-turb-note").textContent = loc.turbNote;
+  }
 
   // spatial check vs neighbor stations
   const nb = Object.values(S.neighbors);
@@ -2305,12 +2352,31 @@ function render(nc){
     if(!n){ el.textContent="—"; note.textContent="no data"; return; }
     const d = (S.cur!=null) ? n.temp - S.cur : null;
     el.textContent = `${fmt1(n.temp)}°${UNIT}${d!=null?` (${d>=0?"+":""}${fmt1(d)}°)`:""}`;
+    const HOMEW = CFG.key==="RJTT" ? "Haneda" : CFG.key;
     note.textContent = n.name + (d==null ? "" :
-      d>=1.5 ? " — running warmer than Haneda" :
-      d<=-1.5 ? " — running cooler than Haneda" : " — in line with Haneda");
+      d>=1.5 ? ` — running warmer than ${HOMEW}` :
+      d<=-1.5 ? ` — running cooler than ${HOMEW}` : ` — in line with ${HOMEW}`);
   });
   const sp = document.getElementById("n-read"), spn = document.getElementById("n-read-note");
-  if(sp){
+  if(sp && CFG.key==="KMIA"){
+    const inland=S.neighbors["KTMB"];
+    const dT=(inland&&S.cur!=null)?inland.temp-S.cur:null;
+    const crash=(inland&&inland.prevT!=null)?(inland.prevT-inland.temp):null;
+    if(dT==null){ sp.textContent="—"; spn.textContent="needs the inland station"; }
+    else if(crash!=null && crash>=4){
+      sp.textContent="⛈ INLAND COLLAPSE"; sp.style.color="var(--accent)";
+      spn.textContent=`Tamiami crashed ${fmt1(crash)}° in the last hour — storm outflow often reaches KMIA next; the high may be printed`;
+    } else if(dT>=2){
+      sp.textContent="BREEZE CAPPING"; sp.style.color="var(--ink)";
+      spn.textContent=`inland running +${fmt1(dT)}° — sea breeze holding the coast cooler while storm fuel builds west`;
+    } else if(dT<=-2){
+      sp.textContent="COAST WARM"; sp.style.color="var(--ink)";
+      spn.textContent=`KMIA running ${fmt1(-dT)}° above inland — unusual; watch for an east-side heat pocket`;
+    } else {
+      sp.textContent="UNIFORM"; sp.style.color="var(--ink)";
+      spn.textContent="no meaningful gradient across the basin — models likely have the area right";
+    }
+  } else if(sp){
     const tokyo = S.neighbors["44132"];
     const dT = (tokyo && S.cur!=null) ? tokyo.temp - S.cur : null;
     if(dT==null){ sp.textContent="—"; spn.textContent="needs both stations"; }
@@ -2518,7 +2584,7 @@ function drawSounding(){
 
   // ---- caption ----
   const parts=[];
-  parts.push(`valid ~${p2(S0.validH)}:00 JST`);
+  parts.push(`valid ~${p2(S0.validH)}:00 ${CFG.tzLabel}`);
   if(mixZ!=null) parts.push(`mixing height ≈ ${mixZ} m (to ${mixP} hPa)`);
   else parts.push(`deep mixing — no cap found below 500 hPa`);
   if(inv) parts.push(`⚠ inversion ${inv.p0}→${inv.p1} hPa (~${inv.z0} m) — lid on surface heating, suppresses the max`);
@@ -2574,7 +2640,8 @@ function drawT850(){
   g += `<line x1="${X(now)}" y1="${T}" x2="${X(now)}" y2="${T+ph}" style="stroke:var(--ink);stroke-width:1.2;stroke-dasharray:4 4;opacity:.6"/>`;
   // implied surface max annotation from midday mean
   if(S.t850){
-    g += `<text x="${X(11)+6}" y="${T+16}" font-size="11.5" style="fill:var(--jma);font-weight:600">midday mean ${fmt1(S.t850.mean)}° → sunny mixed sfc max ~${fmt1(S.t850.mean+9)}–${fmt1(S.t850.mean+12)}°</text>`;
+    const _ms=(UNIT==="F")?1.8:1;
+    g += `<text x="${X(11)+6}" y="${T+16}" font-size="11.5" style="fill:var(--jma);font-weight:600">midday mean ${fmt1(S.t850.mean)}° → sunny mixed sfc max ~${fmt1(S.t850.mean+CFG.t850Mix.lo*_ms)}–${fmt1(S.t850.mean+CFG.t850Mix.hi*_ms)}°</text>`;
   }
   svg.innerHTML = g;
 }
@@ -2718,7 +2785,7 @@ async function fastObsTick(){
       const ff=(await rr.json()).features; const ts=ff&&ff[0]&&ff[0].properties&&ff[0].properties.timestamp;
       if(!ts || ts===__lastObsStamp) return;
       __lastObsStamp=ts;
-      await Promise.allSettled([fetchNWSObs(), fetchPWS()]);
+      await Promise.allSettled([fetchNWSObs(), fetchPWS(), fetchNeighbors()]);
       render(computeNowcast());
       const el2=document.getElementById("m-updated");
       if(el2){ const j2=jstParts(); el2.textContent=`${p2(j2.h)}:${p2(j2.mi)}:${p2(j2.s)} ${CFG.tzLabel}`; }
