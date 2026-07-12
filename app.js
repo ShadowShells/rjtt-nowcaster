@@ -1357,6 +1357,14 @@ function computeBuckets(nc){
     const since = Math.max(0, now - (nc.peakT ?? 14));
     sigma = Math.max(0.15, Math.min(sigma, 0.32 - 0.04*since));
   }
+  // pre-peak humility: while the climatological climb window is open, certainty
+  // is capped — the peakSet shrinker above must never mint 90%+ before ~15:00.
+  try{
+    const _tg=jstParts().dec;
+    let _g=15; const _c=peakClimo();
+    if(_c&&_c.hi&&_c.hi.p75!=null) _g=Math.min(16,Math.max(13.5,_c.hi.p75));
+    if(_tg < _g) sigma = Math.max(sigma, UNIT==="F"?1.0:0.55);
+  }catch(e){}
   const floorK = (S.metarMax!=null) ? Math.round(S.metarMax) : null;
   // KMIA-class stations: the sensor encodes WHOLE °C, then converts to °F.
   // Printable values live on the 1.8°F ladder (…89.6, 91.4, 93.2…) — integers
@@ -2091,7 +2099,16 @@ function render(nc){
         falling = (cur!=null && S.cur!=null && (S.obsMax - S.cur) >= CFG.decide.drop);  // cooled off the high (station-scaled)
       }
       // a day is DECIDED when the peak is set AND (temp has fallen well off it, OR it's evening 18:00+)
-      const decided = (nc.kmia && nc.kmia.collapse) || (nc.peakSet && (sinceHigh!=null && sinceHigh >= CFG.decide.wait && (falling || now2 >= 18)));
+      // SETTLEMENT GATE: no lock of any kind before the climatological climb
+      // window closes. Bypasses: evening, a genuine crash, a KMIA storm collapse.
+      let _gateNow = 15;
+      try{
+        const _cl0=peakClimo();
+        _gateNow = Math.min(16, Math.max(13.5, (_cl0&&_cl0.hi&&_cl0.hi.p75!=null)?_cl0.hi.p75:15));
+      }catch(e){}
+      const bigDrop = (S.obsMax!=null && S.cur!=null) ? (S.obsMax - S.cur) : 0;
+      const gateOpen = now2 >= _gateNow || now2 >= 18 || bigDrop >= (UNIT==="F"?2.2:1.2) || !!(nc.kmia && nc.kmia.collapse);
+      const decided = (nc.kmia && nc.kmia.collapse) || (gateOpen && nc.peakSet && (sinceHigh!=null && sinceHigh >= CFG.decide.wait && (falling || now2 >= 18)));
       // rounding-edge risk only matters if the max could still CLIMB into the next bucket.
       // 23.3 rounds to 23; bucket 24 needs >=23.5, i.e. the temp must RISE. If decided/falling, it can't.
       const frac = (S.obsMax!=null) ? (S.obsMax - Math.floor(S.obsMax)) : null;   // .3 for 23.3
@@ -2110,13 +2127,16 @@ function render(nc){
         if(vLabel) vLabel.textContent = "Likely final";
         const conf = Math.round(best.p*100);
         vNote.textContent = `${fmt1(S.obsMax)}° sits just below the rounding edge and a late nudge could still tip it up — adjacent bucket live; watch the prints · ${conf}%`;
-      } else if(nc.peakSet){
-        // peak set, not near a climbable edge: round the observed high
+      } else if(nc.peakSet && gateOpen){
         const settledK = Math.round(S.obsMax);
         vEl.textContent = `${settledK}°${UNIT}`;
         if(vLabel) vLabel.textContent = "Likely final";
-        vNote.textContent = `peak has passed at ${fmt1(S.obsMax)}° (${hhmm(S.obsMaxT)} ${CFG.tzLabel}) → ${settledK}°; a late warm push before ~15:00 is the only upside`;
+        vNote.textContent = `peak has passed at ${fmt1(S.obsMax)}° (${hhmm(S.obsMaxT)} ${CFG.tzLabel}) → ${settledK}°; only a freak late push changes it`;
         bk.__settledK = settledK;
+      } else if(nc.peakSet){
+        vEl.textContent = `${best.k}°${UNIT}`;
+        if(vLabel) vLabel.textContent = "Peak candidate";
+        vNote.textContent = `${fmt1(S.obsMax)}° (${hhmm(S.obsMaxT)} ${CFG.tzLabel}) leads, but the climb window runs to ~${hhmm(_gateNow)} — one re-spike past ${(Math.floor(S.obsMax)+0.5).toFixed(1)}° flips the bucket · NOT locked`;
       } else {
         vEl.textContent = `${best.k}°${UNIT}`;
         const conf = Math.round(best.p*100);
@@ -2249,7 +2269,8 @@ function render(nc){
 
     // FINAL CALL: arbitrate verdict vs FOLLOW vs headline through the evidence chain
     const fcEl = document.getElementById("fc-val"), fcNote = document.getElementById("fc-note");
-    const FINAL={ k:(bk&&bk.__settledK!=null)?bk.__settledK:(top?top.k:null),
+    const _tp=(bk&&bk.buckets&&bk.buckets.length)?bk.buckets.slice().sort((a,b)=>b.p-a.p)[0]:null;
+    const FINAL={ k:(bk&&bk.__settledK!=null)?bk.__settledK:(_tp?_tp.k:null),
       settled:!!(bk&&bk.__settledK!=null) };
     FINAL.p=(bk&&bk.buckets&&FINAL.k!=null)?((bk.buckets.find(b=>b.k===FINAL.k)||{}).p??null):null;
     try{ window.__FINAL=FINAL; }catch(e){}
