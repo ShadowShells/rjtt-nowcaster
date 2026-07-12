@@ -1444,6 +1444,17 @@ function peakClimo(){
 }
 function _hm(min){ min=((min%1440)+1440)%1440; let h=Math.floor(min/60), m=Math.round(min%60); if(m===60){h=(h+1)%24;m=0;} return `${h}:${p2(m)}`; }
 function _dur(min){ return `${Math.floor(min/60)}h ${p2(Math.round(min%60))}m`; }
+function fixFollowSig(list, F){
+  if(!F || !F.settled || F.k==null) return list;
+  for(const x of (list||[])){
+    const m=/^⚠ follow (-?\d+)°/.exec(x.t||"");
+    if(!m) continue;
+    const fb=+m[1];
+    if(fb===F.k){ x.t="follow ✓"; x.f="FOLLOW model agrees with the settled "+F.k+"°."; x.hot=false; }
+    else { x.f=String(x.f||"").replace(/vs the -?\d+° verdict/,"vs the settled "+F.k+"°"); }
+  }
+  return list;
+}
 const WDAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 function pinTipHTML(kind, h){
   const cl=peakClimo(); if(!cl) return "";
@@ -1829,7 +1840,7 @@ function computeNowcast(){
         const lastPrint=(()=>{ const pr=(S.obs||[]).filter(x=>CFG.printMin(Math.round((x.t%1)*60))); return pr.length?Math.round(pr[pr.length-1].v):null; })();
         out.printFx={ label:`${p2(Math.floor(tNext))}:${p2(Math.round((tNext%1)*60))}`,
           valTxt:`${val}°`, tick:(lastPrint!=null && val>lastPrint),
-          hover:`AMeDAS ${fmt1(S.cur)}° rising ${slope>=0?"+":""}${fmt1(slope)}°/h → ~${fmt1(proj)}° at the print → shows ${val}°.` };
+          hover:`AMeDAS ${fmt1(S.cur)}° ${slope>=0?`rising +${fmt1(slope)}`:`falling ${fmt1(Math.abs(slope))}`}°/h → ~${fmt1(proj)}° at the print → shows ${val}°.` };
       }
     } else if(CFG.obs==="nws"){
       const rowsC=(S.obs||[]).map(x=>({t:x.t, c:Math.round((x.v-32)/1.8)}));
@@ -1924,7 +1935,7 @@ function render(nc){
   try{ modelLogTick(); }catch(e){}
   try{ renderHourly(nc); }catch(e){}
   try{ Promise.resolve().then(()=>{
-    const _S = window.__SIG || [];
+    const _S = fixFollowSig(window.__SIG || [], window.__FINAL);
     const tg=document.getElementById("fc-tags"), why=document.getElementById("fc-why"), wb=document.getElementById("fc-why-body");
     if(tg) tg.innerHTML = _S.map(x=>`<span class="sig${x.hot?" hot":""}" title="${x.f.replace(/"/g,"&quot;")}">${x.t}</span>`).join("");
     if(why && wb){
@@ -2181,6 +2192,13 @@ function render(nc){
     if(nc && nc.printFx && vNote){
       sig((nc.printFx.tick?"⚡ ":"")+"next print → "+nc.printFx.valTxt+" @ "+nc.printFx.label, nc.printFx.hover, !!nc.printFx.tick);
     }
+    try{
+      const _jT=journalLoad()[todayISO()];
+      if(_jT && _jT.lock && vNote){
+        sig("🔒 locked "+_jT.lock.bucket+"° @ "+hhmm(_jT.lock.t),
+            "Frozen at the first tick inside 10:15–13:00 "+CFG.tzLabel+" — write-once, graded tomorrow against settlement. The live verdict keeps moving but can never rewrite this.");
+      }
+    }catch(e){}
     if(CFG.key==="KMIA" && S.pws && (Date.now()-S.pws.t)<20*60*1000 && vNote){
       sig("PWS "+fmt1(S.pws.f)+"°F","Nearby personal weather station ("+S.pws.id+") — the continuous thermometer between whole-°C METAR prints.");
     }
@@ -2231,6 +2249,25 @@ function render(nc){
 
     // FINAL CALL: arbitrate verdict vs FOLLOW vs headline through the evidence chain
     const fcEl = document.getElementById("fc-val"), fcNote = document.getElementById("fc-note");
+    const FINAL={ k:(bk&&bk.__settledK!=null)?bk.__settledK:(top?top.k:null),
+      settled:!!(bk&&bk.__settledK!=null) };
+    FINAL.p=(bk&&bk.buckets&&FINAL.k!=null)?((bk.buckets.find(b=>b.k===FINAL.k)||{}).p??null):null;
+    try{ window.__FINAL=FINAL; }catch(e){}
+    try{ const hv=document.getElementById("hero-verdict"); if(hv&&FINAL.k!=null) hv.textContent=FINAL.k+"°"; }catch(e){}
+    try{
+      const fa=document.getElementById("fc-act");
+      if(fa){
+        if(FINAL.k==null){ fa.style.display="none"; }
+        else{
+          const pct=FINAL.p!=null?Math.round(FINAL.p*100):null;
+          const up=FINAL.k+1;
+          fa.innerHTML = FINAL.settled
+            ? `TRADE: <b>buy ${FINAL.k}°</b>${pct!=null?` — fair ≈${pct}%; take it below that`:""} · ${up}° is a lotto (needs a fresh spike past ${FINAL.k}.5° before a print)`
+            : `TRADE: lean <b>${FINAL.k}°</b>${pct!=null?` (≈${pct}%)`:""} · day not locked — size for a flip`;
+          fa.style.display="block";
+        }
+      }
+    }catch(e){}
     if(fcEl && bk && bk.__settledK!=null){
       // day is decided — final call is the settled high, no arbitration
       fcEl.textContent = `${bk.__settledK}°${UNIT}`;
