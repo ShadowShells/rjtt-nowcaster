@@ -52,6 +52,7 @@
     </div>
     <div class="sumgrid" id="summary"><div><div class="label">Loading</div><div class="mid">—</div></div></div>
     <div class="note-line" id="jr-line" style="display:none"></div>
+    <div class="note-line" id="jr-trail" style="display:none;margin-top:4px;opacity:.85"></div>
   </section>
 
   <section class="panel">
@@ -224,15 +225,63 @@ function renderSummary(sum, iso){
     const e=j[iso], line=document.getElementById("jr-line");
     if(e && e.lock){
       const graded=e.actual!=null;
+      const pp2=(n)=>String(n).padStart(2,"0");
+      const tf=(t)=>`${pp2(Math.floor(t))}:${pp2(Math.round((t%1)*60))}`;
+      const pathEl=document.getElementById("jr-path");
+      if(pathEl){
+        if(e.calls && e.calls.length){
+          const lockT=e.lock?e.lock.t:null;
+          let bits=[]; let lockShown=false;
+          for(const c of e.calls){
+            if(lockT!=null && !lockShown && c.t>=lockT){ bits.push(`🔒${tf(lockT)}`); lockShown=true; }
+            bits.push(`${c.b}°@${tf(c.t)}`);
+          }
+          if(lockT!=null && !lockShown) bits.push(`🔒${tf(lockT)}`);
+          let tail="";
+          if(e.callT!=null) tail=` · stable-right from ${tf(e.callT)}`;
+          pathEl.textContent = "call path: " + bits.join(" → ") + tail + ` · ${e.calls.length} change${e.calls.length>1?"s":""} recorded`;
+        } else {
+          pathEl.textContent = e.lock ? "call path: (no intraday changes recorded — page likely opened at lock time only)" : "";
+        }
+      }
       const sVal=(e.actualS!=null)?e.actualS:e.actual;
       const hit=graded && sVal===e.lock.bucket;
       line.style.display="block";
-      line.textContent=`Your journal that day: locked ${e.lock.bucket}° at 10:30 JST`+
+      const _lt=e.lock.t!=null?`${p2(Math.floor(e.lock.t))}:${p2(Math.round((e.lock.t%1)*60))}`:"?";
+      line.textContent=`Your journal that day: locked ${e.lock.bucket}° at ${_lt} ${CFG.tzLabel||""}`+
         (graded?` · settled ${sVal}° (phys ${fmt1(e.actualX)}°) → ${hit?"HIT ✓":"MISS ✗"}`:" · not graded yet");
+      try{
+        const tr=document.getElementById("jr-trail");
+        if(tr){ const html=jrTrailHTML(e,sVal,graded,hit);
+          if(html){ tr.innerHTML=html; tr.style.display="block"; } else { tr.style.display="none"; } }
+      }catch(e2){}
     } else line.style.display="none";
   }catch(e){}
 }
 
+function jrTrailHTML(e, sVal, graded, hit){
+  const cs=(e.calls||[]).slice();
+  if(!cs.length) return "";
+  const hhm=t=>`${p2(Math.floor(t))}:${p2(Math.round((t%1)*60))}`;
+  const kept=[]; let lockDone=false;
+  for(let i=0;i<cs.length;i++){
+    const c=cs[i];
+    const flip = i>0 && c.b!==cs[i-1].b;
+    const isLast = i===cs.length-1;
+    const nearLock = e.lock && !lockDone && c.t>=e.lock.t;
+    if(i===0 || flip || isLast || nearLock){
+      let tag=`${c.b}°@${hhm(c.t)}`;
+      if(flip) tag=`<span style="color:var(--accent)">⚠ ${tag}</span>`;
+      if(nearLock){ tag=`<b>[LOCK ${e.lock.bucket}°@${hhm(e.lock.t)}]</b> ${tag}`; lockDone=true; }
+      kept.push(tag);
+    }
+  }
+  if(e.lock && !lockDone) kept.unshift(`<b>[LOCK ${e.lock.bucket}°@${hhm(e.lock.t)}]</b>`);
+  let held="";
+  if(graded && e.callT!=null) held=` · held ${sVal}° from ${hhm(e.callT)} onward`;
+  else if(graded) held=` · never stably on ${sVal}° — the lock ${hit?"was right anyway":"and the calls both missed"}`;
+  return `call trail: ${kept.join(" → ")}${held}`;
+}
 /*__KPARSE__*/
 function _degIdx(deg){ if(deg==null) return null; const i=Math.round(deg/22.5)%16; return i===0?16:i; }
 function _uT(c){ return c==null?null:(U==="F"? c*9/5+32 : c); }
