@@ -21,7 +21,8 @@ const STATIONS = {
     printMin:(m)=>(m>=45),
     wu:"https://www.wunderground.com/history/daily/us/fl/miami/KMIA",
     wet:(mo)=>(mo>=5&&mo<=10), onshore:[4,5,6], memDays:10, memHalf:5, stormDrop:4, capHint:95,
-    skillW:{past:0.3,today:0.7,days:1}, climoDays:21, decide:{drop:1.0,wait:1.0}, wetCeil:{knee:94,k:0.35} }
+    skillW:{past:0.3,today:0.7,days:1}, climoDays:21, decide:{drop:1.0,wait:1.0}, wetCeil:{knee:94,k:0.35},
+    mesh:{ poly:[[25.86,-80.38],[25.88,-80.24],[25.83,-80.17],[25.74,-80.17],[25.70,-80.30],[25.76,-80.40]] } }
 };
 let CFG = STATIONS.RJTT;
 try{ CFG = STATIONS[localStorage.getItem("wx_station")] || STATIONS.RJTT; }catch(e){}
@@ -156,6 +157,140 @@ function _nwsRows(features){
   }
   rows.sort((a,b)=> a.iso===b.iso ? a.dec-b.dec : (a.iso<b.iso?-1:1));
   return rows;
+}
+/* ===== PWS MESH: polygon-captured station network with QC, hourly health,
+   trimmed-mean consensus, slope, and METAR-offset tracking ===== */
+function _pip(lat, lon, poly){
+  let inside=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+    const yi=poly[i][0], xi=poly[i][1], yj=poly[j][0], xj=poly[j][1];
+    if(((yi>lat)!==(yj>lat)) && (lon < (xj-xi)*(lat-yi)/(yj-yi)+xi)) inside=!inside;
+  }
+  return inside;
+}
+function _med(a){ if(!a.length) return null; const b=a.slice().sort((x,y)=>x-y); const m=b.length>>1; return b.length%2?b[m]:(b[m-1]+b[m])/2; }
+function _trimMean(a){ if(a.length<5) return a.reduce((x,y)=>x+y,0)/a.length; const b=a.slice().sort((x,y)=>x-y); const k=Math.max(1,Math.floor(b.length*0.1)); const c=b.slice(k,b.length-k); return c.reduce((x,y)=>x+y,0)/c.length; }
+function _slopeFh(pts){ if(pts.length<3) return null; const t0=pts[0].ms; const xs=pts.map(p=>(p.ms-t0)/3600000), ys=pts.map(p=>p.f);
+  const n=xs.length, sx=xs.reduce((a,b)=>a+b,0), sy=ys.reduce((a,b)=>a+b,0), sxx=xs.reduce((a,b)=>a+b*b,0), sxy=xs.reduce((a,b,i)=>a+b*ys[i],0);
+  const d=n*sxx-sx*sx; return Math.abs(d)<1e-9?null:(n*sxy-sx*sy)/d; }
+function meshLoad(){ try{ return JSON.parse(localStorage.getItem(CFG.ns+"_mesh_v1")||"{}"); }catch(e){ return {}; } }
+function meshSave(m){ try{ localStorage.setItem(CFG.ns+"_mesh_v1", JSON.stringify(m)); }catch(e){} }
+async function meshSourceAmbient(bbox){
+  const u=`https://lightning.ambientweather.net/devices?public=true&$limit=200&$publicBox[0][0]=${bbox.w}&$publicBox[0][1]=${bbox.s}&$publicBox[1][0]=${bbox.e}&$publicBox[1][1]=${bbox.n}`;
+  const r=await fetch(u,{cache:"no-store"});
+  if(!r.ok) throw 0;
+  const j=await r.json();
+  const arr=Array.isArray(j)?j:(j.data||[]);
+  const rows=[];
+  for(const d of arr){
+    try{
+      const ld=d.lastData||{}; const f=+ld.tempf;
+      let c=(d.info&&d.info.coords&&(d.info.coords.coords||d.info.coords))||{};
+      const lat=+(c.lat!=null?c.lat:c[1]), lon=+(c.lon!=null?c.lon:c[0]);
+      const ms=+(ld.dateutc||0);
+      if(isFinite(f)&&isFinite(lat)&&isFinite(lon)) rows.push({id:String(d.macAddress||d._id||rows.length), f, lat, lon, ms});
+    }catch(e){}
+  }
+  return rows;
+}
+async function meshSourceWU(){
+  const raw=localStorage.getItem(CFG.ns+"_pws_list"); if(!raw) return [];
+  const cfg=JSON.parse(raw); if(!cfg.key||!Array.isArray(cfg.ids)||!cfg.ids.length) return [];
+  const res=await Promise.allSettled(cfg.ids.slice(0,20).map(id=>
+    fetch(`https://api.weather.com/v2/pws/observations/current?stationId=${encodeURIComponent(id)}&format=json&units=e&apiKey=${encodeURIComponent(cfg.key)}`,{cache:"no-store"})
+      .then(r=>r.ok?r.json():Promise.reject(0))));
+  const rows=[];
+  for(const r of res){
+    if(r.status!=="fulfilled") continue;
+    const o=r.value&&r.value.observations&&r.value.observations[0];
+    if(o&&o.imperial&&o.imperial.temp!=null&&o.lat!=null&&o.lon!=null)
+      rows.push({id:o.stationID, f:+o.imperial.temp, lat:+o.lat, lon:+o.lon, ms:(o.epoch?o.epoch*1000:Date.now())});
+  }
+  return rows;
+}
+async function fetchMesh(){
+  try{
+    if(!CFG.mesh){ S.mesh=null; return; }
+    let poly=CFG.mesh.poly;
+    try{ const ov=localStorage.getItem(CFG.ns+"_mesh_poly"); if(ov){ const p=JSON.parse(ov); if(Array.isArray(p)&&p.length>=3) poly=p; } }catch(e){}
+    const lats=poly.map(p=>p[0]), lons=poly.map(p=>p[1]);
+    const bbox={s:Math.min(...lats), n:Math.max(...lats), w:Math.min(...lons), e:Math.max(...lons)};
+    let rows=[], src="";
+    try{ rows=await meshSourceAmbient(bbox); if(rows.length) src="ambient"; }catch(e){}
+    if(!rows.length){ try{ rows=await meshSourceWU(); if(rows.length) src="wu"; }catch(e){} }
+    const now=Date.now();
+    const M=meshLoad(); M.health=M.health||{}; M.offs=M.offs||[];
+    // hourly health sweep: decay strikes, expire benches
+    if(!M.sweep || now-M.sweep>3600e3){
+      for(const id in M.health){ const h=M.health[id];
+        if(h.bench && h.bench<now){ h.bench=0; h.strikes=0; }
+        else if(!h.bench) h.strikes=Math.max(0,(h.strikes|0)-1); }
+      M.sweep=now;
+    }
+    S.meshHist=S.meshHist||{};
+    const cand=[];
+    for(const r of rows){
+      if(!_pip(r.lat, r.lon, poly)) continue;                    // the polygon
+      if(!(r.f>=30&&r.f<=110)) continue;                          // absolute bounds
+      if(r.ms && now-r.ms>20*60*1000){ _strike(M,r.id,"stale"); continue; }
+      const H=(S.meshHist[r.id]=S.meshHist[r.id]||[]);
+      if(!H.length || now-H[H.length-1].ms>60e3) H.push({ms:now,f:r.f});
+      if(H.length>24) H.shift();
+      cand.push(r);
+    }
+    // flatline: 90+ min of <0.2° range while the mesh itself moved
+    const prev=S.meshSeries&&S.meshSeries.length?S.meshSeries[S.meshSeries.length-1].f:null;
+    for(const r of cand.slice()){
+      const H=S.meshHist[r.id]||[];
+      if(H.length>=6 && (H[H.length-1].ms-H[0].ms)>=90*60*1000){
+        const fs=H.map(x=>x.f);
+        if(Math.max(...fs)-Math.min(...fs)<0.2 && prev!=null && S.meshSeries.length>=6){
+          const m0=S.meshSeries[0].f;
+          if(Math.abs(prev-m0)>1){ _strike(M,r.id,"flatline"); cand.splice(cand.indexOf(r),1); }
+        }
+      }
+    }
+    // MAD outliers
+    let temps=cand.map(r=>r.f);
+    const med=_med(temps);
+    if(med!=null){
+      const mad=_med(temps.map(t=>Math.abs(t-med)))||0;
+      const lim=Math.max(3, 3*1.4826*mad);
+      for(const r of cand.slice()){
+        if(Math.abs(r.f-med)>lim){ _strike(M,r.id,"outlier"); cand.splice(cand.indexOf(r),1); }
+      }
+    }
+    // bench enforcement
+    const healthy=cand.filter(r=>{ const h=M.health[r.id]; return !(h&&h.bench&&h.bench>now); });
+    let benched=cand.length-healthy.length;
+    for(const id in M.health){ const h=M.health[id]; if(h.bench&&h.bench>now) benched=benched; }
+    if(healthy.length>=3){
+      const cons=_trimMean(healthy.map(r=>r.f));
+      const fs=healthy.map(r=>r.f).sort((a,b)=>a-b);
+      const spread=fs[Math.floor(fs.length*0.9)]-fs[Math.floor(fs.length*0.1)];
+      S.meshSeries=S.meshSeries||[];
+      S.meshSeries.push({ms:now, f:cons});
+      while(S.meshSeries.length>40 || (S.meshSeries.length&&now-S.meshSeries[0].ms>3*3600e3)) S.meshSeries.shift();
+      const sl=_slopeFh(S.meshSeries.filter(p=>now-p.ms<=30*60*1000));
+      let off=null;
+      try{
+        const last=(S.obs&&S.obs.length)?S.obs[S.obs.length-1].v:null;
+        if(last!=null){ const curC=Math.round((last-32)/1.8); off=+(cons-(curC*1.8+32)).toFixed(2);
+          M.offs.push(off); if(M.offs.length>24) M.offs.shift(); }
+      }catch(e){}
+      S.mesh={ f:+cons.toFixed(2), n:healthy.length, total:rows.length, benched,
+        spread:+(spread||0).toFixed(2), slope:sl!=null?+sl.toFixed(2):null,
+        off, offMed:_med(M.offs), src, ms:now };
+    } else {
+      S.mesh=null;
+    }
+    meshSave(M);
+  }catch(e){ S.mesh=null; }
+}
+function _strike(M,id,why){
+  const h=(M.health[id]=M.health[id]||{strikes:0,bench:0});
+  h.strikes=(h.strikes|0)+1; h.why=why;
+  if(h.strikes>=3){ h.bench=Date.now()+3*3600e3; }
 }
 async function fetchPWS(){
   try{
@@ -1451,7 +1586,7 @@ function peakClimo(){
            recent:days.slice(-5).filter(d=>d.date&&d.lo!=null) };
 }
 function _hm(min){ min=((min%1440)+1440)%1440; let h=Math.floor(min/60), m=Math.round(min%60); if(m===60){h=(h+1)%24;m=0;} return `${h}:${p2(m)}`; }
-function _dur(min){ return `${Math.floor(min/60)}h ${p2(Math.round(min%60))}m`; }
+function _dur(min){ const L=Math.round(min); return `${Math.floor(L/60)}h ${p2(L%60)}m`; }
 function fixFollowSig(list, F){
   if(!F || !F.settled || F.k==null) return list;
   for(const x of (list||[])){
@@ -1859,10 +1994,17 @@ function computeNowcast(){
         const dwell=Math.max(0, tp.dec-lastTick.t);
         let cad=null;
         if(ticks.length>=2){ const iv=[]; for(let i=1;i<ticks.length;i++) iv.push(ticks[i].t-ticks[i-1].t); cad=iv.slice(-3).reduce((a,b)=>a+b,0)/Math.min(3,iv.length); }
-        const cPerHr=cad?1/cad:0.8;
+        let cPerHr=cad?1/cad:0.8;
         let cEst=Math.min(curC+0.45, (curC-0.5)+dwell*cPerHr);
-        let pwsUsed=false;
-        if(S.pws && (Date.now()-S.pws.t)<20*60*1000 && Math.abs(S.pws.f-(curC*1.8+32))<=2.7){
+        let pwsUsed=false, meshUsed=false;
+        if(S.mesh && (Date.now()-S.mesh.ms)<10*60*1000 && S.mesh.n>=4){
+          const mC=(S.mesh.f-(S.mesh.offMed||0)-32)/1.8;
+          if(Math.abs(mC-curC)<=1.6){
+            cEst=mC; meshUsed=true;
+            if(S.mesh.slope!=null && Math.abs(S.mesh.slope)<=6) cPerHr=S.mesh.slope/1.8;
+          }
+        }
+        if(!meshUsed && S.pws && (Date.now()-S.pws.t)<20*60*1000 && Math.abs(S.pws.f-(curC*1.8+32))<=2.7){
           cEst=(S.pws.f-32)/1.8; pwsUsed=true;
         }
         const tNext=(tp.mi<53)?(tp.h+53/60):(tp.h+1+53/60);
@@ -1871,7 +2013,7 @@ function computeNowcast(){
         const fL=+(cNext*1.8+32).toFixed(1);
         out.printFx={ label:`${p2(Math.floor(tNext))}:53`,
           valTxt:`${fL}°F`, tick:(cNext>curC),
-          hover:`Whole-°C encoder: at ${curC}°C for ${Math.round(dwell*60)}m, ticking ~${fmt1(cPerHr)}°C/h${pwsUsed?` · PWS ${S.pws.id} anchors ${fmt1(S.pws.f)}°F (${fmt1(cEst)}°C)`:` · est ${fmt1(cEst)}°C now`} → next print likely ${cNext}°C = ${fL}°F.` };
+          hover:`Whole-°C encoder: at ${curC}°C for ${Math.round(dwell*60)}m, ticking ~${fmt1(cPerHr)}°C/h${meshUsed?` · MESH ${S.mesh.n}stn ${fmt1(S.mesh.f)}°F (Δmetar ${fmt1(S.mesh.offMed||0)}°) anchors ${fmt1(cEst)}°C`:pwsUsed?` · PWS ${S.pws.id} anchors ${fmt1(S.pws.f)}°F (${fmt1(cEst)}°C)`:` · est ${fmt1(cEst)}°C now`} → next print likely ${cNext}°C = ${fL}°F.` };
       }
     }
   }catch(e){}
@@ -1943,6 +2085,21 @@ function render(nc){
   try{ modelLogTick(); }catch(e){}
   try{ renderHourly(nc); }catch(e){}
   try{ Promise.resolve().then(()=>{
+    const B=window.__BK||{}; const P=(window.__PICK!=null)?window.__PICK:null;
+    const settled=(B.settledK!=null);
+    const fk = settled? B.settledK : (P!=null? P : (B.buckets&&B.buckets.length? B.buckets.slice().sort((a,b)=>b.p-a.p)[0].k : null));
+    const fp = (B.buckets&&fk!=null)? ((B.buckets.find(x=>x.k===fk)||{}).p ?? null) : null;
+    window.__FINAL={k:fk, settled, p:fp};
+    try{ const hv=document.getElementById("hero-verdict"); if(hv&&fk!=null) hv.textContent=fk+"°"; }catch(e){}
+    try{
+      const fa=document.getElementById("fc-act");
+      if(fa){ if(fk==null){ fa.style.display="none"; } else {
+        const pct=fp!=null?Math.round(fp*100):null, up=fk+1;
+        fa.innerHTML = settled
+          ? `TRADE: <b>buy ${fk}°</b>${pct!=null?` — fair ≈${pct}%; take it below that`:""} · ${up}° is a lotto (needs a fresh spike past ${fk}.5° before a print)`
+          : `TRADE: lean <b>${fk}°</b>${pct!=null?` (≈${pct}%)`:""} · day not locked — size for a flip`;
+        fa.style.display="block"; } }
+    }catch(e){}
     const _S = fixFollowSig(window.__SIG || [], window.__FINAL);
     const tg=document.getElementById("fc-tags"), why=document.getElementById("fc-why"), wb=document.getElementById("fc-why-body");
     if(tg) tg.innerHTML = _S.map(x=>`<span class="sig${x.hot?" hot":""}" title="${x.f.replace(/"/g,"&quot;")}">${x.t}</span>`).join("");
@@ -2192,6 +2349,14 @@ function render(nc){
       }
       if(nc.wetCap) sig("wet ceiling −"+fmt1(nc.wetCap)+"°","Wet-season prior: storm/cloud cooling rarely lets Miami run past the low-90s — headline trimmed above "+(CFG.wetCeil?CFG.wetCeil.knee:94)+"°.");
       try{
+        if(S.mesh && (Date.now()-S.mesh.ms)<10*60*1000){
+          const m=S.mesh;
+          sig(`mesh ${fmt1(m.f)}° ·${m.n}stn${m.slope!=null?` ${m.slope>=0?"+":""}${fmt1(m.slope)}°/h`:""}`,
+              `${m.n} healthy PWS inside the polygon (of ${m.total} captured, ${m.benched} benched) · spread ${fmt1(m.spread)}° · Δmetar ${m.offMed!=null?fmt1(m.offMed):"—"}° · src ${m.src}. Trimmed-mean consensus feeding the print projector.`,
+              m.slope!=null && Math.abs(m.slope)>=2);
+        }
+      }catch(e){}
+      try{
         const inl=S.neighbors && S.neighbors["KTMB"];
         const crash=(inl && inl.prevT!=null) ? (inl.prevT - inl.temp) : null;
         if(crash!=null && crash>=4){
@@ -2215,7 +2380,7 @@ function render(nc){
     try{
       const _jT=journalLoad()[todayISO()];
       if(_jT && _jT.lock && vNote){
-        sig("🔒 locked "+_jT.lock.bucket+"° @ "+hhmm(_jT.lock.t),
+        sig("🔒 journal "+_jT.lock.bucket+"° @ "+hhmm(_jT.lock.t),
             "Frozen at the first tick inside 10:15–13:00 "+CFG.tzLabel+" — write-once, graded tomorrow against settlement. The live verdict keeps moving but can never rewrite this.");
       }
     }catch(e){}
@@ -2269,29 +2434,11 @@ function render(nc){
 
     // FINAL CALL: arbitrate verdict vs FOLLOW vs headline through the evidence chain
     const fcEl = document.getElementById("fc-val"), fcNote = document.getElementById("fc-note");
-    const _tp=(bk&&bk.buckets&&bk.buckets.length)?bk.buckets.slice().sort((a,b)=>b.p-a.p)[0]:null;
-    const FINAL={ k:(bk&&bk.__settledK!=null)?bk.__settledK:(_tp?_tp.k:null),
-      settled:!!(bk&&bk.__settledK!=null) };
-    FINAL.p=(bk&&bk.buckets&&FINAL.k!=null)?((bk.buckets.find(b=>b.k===FINAL.k)||{}).p??null):null;
-    try{ window.__FINAL=FINAL; }catch(e){}
-    try{ const hv=document.getElementById("hero-verdict"); if(hv&&FINAL.k!=null) hv.textContent=FINAL.k+"°"; }catch(e){}
-    try{
-      const fa=document.getElementById("fc-act");
-      if(fa){
-        if(FINAL.k==null){ fa.style.display="none"; }
-        else{
-          const pct=FINAL.p!=null?Math.round(FINAL.p*100):null;
-          const up=FINAL.k+1;
-          fa.innerHTML = FINAL.settled
-            ? `TRADE: <b>buy ${FINAL.k}°</b>${pct!=null?` — fair ≈${pct}%; take it below that`:""} · ${up}° is a lotto (needs a fresh spike past ${FINAL.k}.5° before a print)`
-            : `TRADE: lean <b>${FINAL.k}°</b>${pct!=null?` (≈${pct}%)`:""} · day not locked — size for a flip`;
-          fa.style.display="block";
-        }
-      }
-    }catch(e){}
+    try{ window.__PICK=null; window.__BK = bk ? { settledK:(bk.__settledK!=null?bk.__settledK:null), buckets:bk.buckets } : null; }catch(e){}
     if(fcEl && bk && bk.__settledK!=null){
       // day is decided — final call is the settled high, no arbitration
       fcEl.textContent = `${bk.__settledK}°${UNIT}`;
+      try{ window.__PICK = bk.__settledK; }catch(e){}
       fcEl.style.color = "var(--ink)";
       fcNote.textContent = `high in at ${fmt1(S.obsMax)}° → settles ${bk.__settledK}° · confirm on WU`;
     } else if(fcEl && bk && bk.buckets.length){
@@ -2301,6 +2448,7 @@ function render(nc){
       const cands = new Set([top && top.k, (tossup && second) ? second.k : null, followBk, headB].filter(v=>v!=null));
       if(cands.size <= 1){
         fcEl.textContent = `${top.k}°${UNIT}`;
+        try{ window.__PICK = top.k; }catch(e){}
         fcEl.style.color = "var(--accent)";
         fcNote.textContent = `${Math.round(top.p*100)}% — all three agree · trade it`;
       } else {
@@ -2359,6 +2507,7 @@ function render(nc){
           pick = pm; conf = "print-gated";
         }
         fcEl.textContent = `${pick}°${UNIT}`;
+        try{ window.__PICK = pick; }catch(e){}
         fcEl.style.color = (conf==="split") ? "var(--ink)" : "var(--accent)";
         // probability context from the bucket distribution (folds in the old toss-up box)
         let probCtx = "";
@@ -2781,7 +2930,7 @@ async function refresh(){
   document.getElementById("btn-refresh").disabled = true;
   S = { obs:[], obsMax:null, obsMaxT:null, cur:null, curT:null, winds:[], hum:null, metars:[], metarMax:null, dewp:null, metarWind:null, taf:null, suns:[], press:[], rains:[], cloud:null, models:{}, tomorrow:{}, ok:{}, neighbors:{}, ydayObsMax:null, ydayModelMax:{}, d2ObsMax:null, d2ModelMax:{}, jmaFx:null, fxRain:null, t850:null, t850Curves:{}, w850:null, hums:[], fxBreeze:null, sounding:null };
   try{ window.S = S; }catch(e){}
-  const [a, m, o, tf] = await Promise.allSettled([fetchAmedas(), fetchPWS(), fetchMetar(), fetchModels(), fetchTaf()]);
+  const [a, m, o, tf] = await Promise.allSettled([fetchAmedas(), fetchPWS(), fetchMesh(), fetchMetar(), fetchModels(), fetchTaf()]);
   await Promise.allSettled([fetchSounding()]);
   await Promise.allSettled([fetchNeighbors(), fetchYdayObs(), fetchJmaForecast(), maybeFetchArchive()]);
   cloudSync();
@@ -2828,6 +2977,13 @@ function freshen(){
 }
 document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) freshen(); });
 window.addEventListener("focus", freshen);
+document.addEventListener("visibilitychange", ()=>{
+  if(document.visibilityState!=="visible") return;
+  try{
+    if(!S.lastFetch || Date.now()-S.lastFetch > 8*60*1000){ safeRefresh().then(scheduleNext); }
+    else freshen();
+  }catch(e){}
+});
 
 /* ===== fast obs loop: pick up each new 10-min AMeDAS print within ~1 min =====
    latest_time.txt is a tiny file; poll it every 60s and only refetch the
@@ -2843,7 +2999,7 @@ async function fastObsTick(){
       const ff=(await rr.json()).features; const ts=ff&&ff[0]&&ff[0].properties&&ff[0].properties.timestamp;
       if(!ts || ts===__lastObsStamp) return;
       __lastObsStamp=ts;
-      await Promise.allSettled([fetchNWSObs(), fetchPWS(), fetchNeighbors()]);
+      await Promise.allSettled([fetchNWSObs(), fetchPWS(), fetchNeighbors(), fetchMesh()]);
       render(computeNowcast());
       const el2=document.getElementById("m-updated");
       if(el2){ const j2=jstParts(); el2.textContent=`${p2(j2.h)}:${p2(j2.mi)}:${p2(j2.s)} ${CFG.tzLabel}`; }

@@ -3,13 +3,13 @@
    - App shell: network-first with cache-busting, so new deploys always win.
    - Live weather APIs: never cached, always fetched fresh.
    - On a new version, the worker activates immediately and tells open pages to reload. */
-const SHELL = "rjtt-shell-v60";
+const SHELL = "rjtt-shell-v62";
 const SHELL_FILES = [
   "./", "./index.html", "./styles.css", "./app.js",
   "./about.html", "./map.html",
   "./history.html", "./favicon.svg", "./manifest.webmanifest"
 ];
-const LIVE_HOSTS = ["jma.go.jp", "aviationweather.gov", "open-meteo.com", "basemaps.cartocdn.com", "unpkg.com", "supabase.co", "gibs.earthdata.nasa.gov", "api.weather.gov", "mesonet.agron.iastate.edu", "api.weather.com"];
+const LIVE_HOSTS = ["jma.go.jp", "aviationweather.gov", "open-meteo.com", "basemaps.cartocdn.com", "unpkg.com", "supabase.co", "gibs.earthdata.nasa.gov", "api.weather.gov", "mesonet.agron.iastate.edu", "api.weather.com", "lightning.ambientweather.net"];
 
 self.addEventListener("install", (e) => {
   // fetch shell fresh from network (bypass HTTP cache) so install never re-caches stale files
